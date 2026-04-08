@@ -277,7 +277,8 @@ def update_schedule(account_id: int, data: dict):
                 data.get("max_per_day", 2),
                 data.get("enabled", 1),
             ))
-        return get_schedule(account_id)
+    # Read after commit so we get the updated data
+    return get_schedule(account_id)
 
 
 # ── Video Operations ────────────────────────────────────────────────

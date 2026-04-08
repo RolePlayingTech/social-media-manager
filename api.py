@@ -63,6 +63,8 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 API_TOKEN = os.environ["SMM_API_TOKEN"]
 DASHBOARD_PASSWORD = os.environ["SMM_PASSWORD"]
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+CORS_ORIGINS = os.environ.get("SMM_CORS_ORIGINS", "http://localhost:3000").split(",")
+TIMEZONE = os.environ.get("SMM_TIMEZONE", "Europe/Warsaw")
 
 # Track publish jobs in-memory
 publish_jobs: dict = {}
@@ -108,7 +110,7 @@ app = FastAPI(title="Social Media Manager", version="2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://roleplayingtech.com", "http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -340,7 +342,7 @@ def compute_estimated_dates(account_id: int) -> dict:
     if not schedule or not schedule.get("enabled") or not videos:
         return {}
 
-    tz = ZoneInfo("Europe/Warsaw")
+    tz = ZoneInfo(TIMEZONE)
     now = datetime.now(tz)
 
     publish_times = schedule.get("publish_times", [])
@@ -579,45 +581,48 @@ async def bulk_upload(
             results.append({"filename": file.filename, "error": "Invalid filename"})
             continue
 
-        file_size = 0
+        content = await file.read()
+        file_size = len(content)
+        if file_size > MAX_UPLOAD_SIZE:
+            results.append({"filename": file.filename, "error": "Too large"})
+            continue
+        if file_size == 0:
+            results.append({"filename": file.filename, "error": "Empty file"})
+            continue
+
         with open(dest_path, "wb") as f:
-            while chunk := await file.read(1024 * 1024):
-                file_size += len(chunk)
-                if file_size > MAX_UPLOAD_SIZE:
-                    os.remove(dest_path)
-                    results.append({"filename": file.filename, "error": "Too large"})
-                    break
-            else:
-                # Look for matching caption
-                file_base = file.filename.rsplit(".", 1)[0]
-                caption = caption_files.get(file_base, "")
+            f.write(content)
 
-                if caption:
-                    caption_path = dest_path.rsplit(".", 1)[0] + ".txt"
-                    with open(caption_path, "w") as cf:
-                        cf.write(caption)
+        # Look for matching caption
+        file_base = file.filename.rsplit(".", 1)[0]
+        caption = caption_files.get(file_base, "")
 
-                # Look for matching subtitle (.srt)
-                subtitle_filename = None
-                srt_data = subtitle_files.get(file_base)
-                if srt_data:
-                    srt_name = os.path.splitext(safe_name)[0] + ".srt"
-                    srt_path = os.path.join(queue_dir, srt_name)
-                    with open(srt_path, "wb") as sf:
-                        sf.write(srt_data)
-                    subtitle_filename = srt_name
+        if caption:
+            caption_path = dest_path.rsplit(".", 1)[0] + ".txt"
+            with open(caption_path, "w") as cf:
+                cf.write(caption)
 
-                video = db.add_video({
-                    "account_id": account_id,
-                    "filename": safe_name,
-                    "original_filename": file.filename,
-                    "title": file_base.replace("_", " ").replace("-", " "),
-                    "caption": caption,
-                    "video_type": video_type,
-                    "file_size": file_size,
-                    "subtitle_file": subtitle_filename,
-                })
-                results.append({"filename": safe_name, "id": video["id"], "ok": True})
+        # Look for matching subtitle (.srt)
+        subtitle_filename = None
+        srt_data = subtitle_files.get(file_base)
+        if srt_data:
+            srt_name = os.path.splitext(safe_name)[0] + ".srt"
+            srt_path = os.path.join(queue_dir, srt_name)
+            with open(srt_path, "wb") as sf:
+                sf.write(srt_data)
+            subtitle_filename = srt_name
+
+        video = db.add_video({
+            "account_id": account_id,
+            "filename": safe_name,
+            "original_filename": file.filename,
+            "title": file_base.replace("_", " ").replace("-", " "),
+            "caption": caption,
+            "video_type": video_type,
+            "file_size": file_size,
+            "subtitle_file": subtitle_filename,
+        })
+        results.append({"filename": safe_name, "id": video["id"], "ok": True})
 
     return {"uploaded": len([r for r in results if r.get("ok")]), "results": results}
 
@@ -724,7 +729,7 @@ YT_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/youtube.force-ssl",
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
-YT_REDIRECT_URI = "https://roleplayingtech.com/social-admin-v2/api/youtube/oauth/callback"
+YT_REDIRECT_URI = os.environ.get("SMM_YT_REDIRECT_URI", "http://localhost:8902/api/youtube/oauth/callback")
 
 # In-memory state for OAuth CSRF protection
 _oauth_states: dict = {}

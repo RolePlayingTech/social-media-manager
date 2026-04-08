@@ -1,52 +1,75 @@
 #!/bin/bash
 #
-# Social Media Manager - Bulk Upload Script
+# Social Media Manager - Local Upload Script
+# Upload videos from your local machine to the server queue.
 #
 # USAGE:
-#   bulk_upload.sh <ACCOUNT_NAME> <VIDEO_DIR> [TYPE]
-#   bulk_upload.sh --list
+#   ./upload_local.sh <ACCOUNT_NAME> <VIDEO_DIR> [TYPE]
+#
+# PARAMETERS:
+#   ACCOUNT_NAME  - account name (or unique substring), e.g. "Świadek" or "Bractwo"
+#   VIDEO_DIR     - directory with .mp4 files (and optional .txt/.srt)
+#   TYPE          - reel, story, short, video (default: reel)
+#
+# ENVIRONMENT:
+#   SMM_API_TOKEN - required, your API bearer token
+#   SMM_SERVER    - optional, default: https://yourserver.com/social-admin-v2/api
+#
+# FILE STRUCTURE:
+#   videos/
+#   ├── episode_01.mp4       # video (required)
+#   ├── episode_01.txt       # caption (optional, matched by name)
+#   ├── episode_01.srt       # YouTube subtitles (optional)
+#   └── episode_02.mp4
 #
 # EXAMPLES:
-#   bulk_upload.sh "MyAccount" /tmp/upload/ reel
-#   bulk_upload.sh "MyChannel" /tmp/upload/ short
+#   ./upload_local.sh "Świadek" ./videos/ reel
+#   ./upload_local.sh "Bractwo" ./videos/ reel
+#   ./upload_local.sh "YouTube" ./videos/ short
 #
-# SSH one-liner from local machine:
-#   scp -r ./videos/ user@yourserver:/tmp/upload/ && \
-#   ssh user@yourserver '/path/to/bulk_upload.sh "MyAccount" /tmp/upload/ reel'
+#   # List available accounts:
+#   ./upload_local.sh --list
 #
 
 set -euo pipefail
 
 # ── Config ───────────────────────────────────────────────────────────
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_DIR="$(dirname "$SCRIPT_DIR")"
-API_BASE="http://127.0.0.1:8902"
+SERVER="${SMM_SERVER:-https://yourserver.com/social-admin-v2/api}"
+TOKEN="${SMM_API_TOKEN:?Set SMM_API_TOKEN environment variable}"
 SUPPORTED_FORMATS="mp4 mov avi mkv webm"
-
-# Load token from .env automatically
-if [ -z "${SMM_API_TOKEN:-}" ] && [ -f "${APP_DIR}/.env" ]; then
-    SMM_API_TOKEN=$(grep -E '^SMM_API_TOKEN=' "${APP_DIR}/.env" | cut -d'=' -f2-)
-fi
-API_TOKEN="${SMM_API_TOKEN:?Could not find SMM_API_TOKEN (set it or check .env)}"
 
 # ── Colors ───────────────────────────────────────────────────────────
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# ── Helper: fetch accounts ──────────────────────────────────────────
+
+fetch_accounts() {
+    curl -sf -H "Authorization: Bearer ${TOKEN}" "${SERVER}/accounts" 2>/dev/null
+}
 
 # ── --list mode ──────────────────────────────────────────────────────
 
 if [ "${1:-}" = "--list" ]; then
     echo -e "${BLUE}Available accounts:${NC}"
-    curl -sf -H "Authorization: Bearer ${API_TOKEN}" "${API_BASE}/api/accounts" | \
-        python3 -c "
+    echo ""
+    ACCOUNTS=$(fetch_accounts)
+    if [ -z "$ACCOUNTS" ]; then
+        echo -e "${RED}Could not fetch accounts from ${SERVER}${NC}"
+        exit 1
+    fi
+    echo "$ACCOUNTS" | python3 -c "
 import sys, json
-for a in json.load(sys.stdin):
+accounts = json.load(sys.stdin)
+for a in accounts:
     q = a.get('stats', {}).get('queued', 0)
-    t = 'IG+FB' if a['type'] == 'instagram_facebook' else 'YT'
-    types = 'reel/story' if t == 'IG+FB' else 'short/video'
-    print(f\"  [{a['id']}] {a['name']}  ({t})  — {q} queued  [{types}]\")
+    print(f\"  [{a['id']}] {a['name']}  ({a['type']})  — {q} queued\")
 "
     exit 0
 fi
@@ -54,8 +77,10 @@ fi
 # ── Validate arguments ──────────────────────────────────────────────
 
 if [ $# -lt 2 ]; then
-    echo -e "Usage: $0 <ACCOUNT_NAME> <VIDEO_DIR> [TYPE]"
-    echo -e "       $0 --list"
+    echo -e "${RED}ERROR: Not enough arguments${NC}"
+    echo ""
+    echo "Usage: $0 <ACCOUNT_NAME> <VIDEO_DIR> [TYPE]"
+    echo "       $0 --list"
     echo ""
     echo "  ACCOUNT_NAME  - account name or substring (e.g. \"Świadek\")"
     echo "  VIDEO_DIR     - directory with video files"
@@ -67,56 +92,43 @@ ACCOUNT_QUERY="$1"
 SOURCE_DIR="$2"
 VIDEO_TYPE="${3:-reel}"
 
+# Validate type
 if [[ ! "$VIDEO_TYPE" =~ ^(reel|story|short|video)$ ]]; then
-    echo -e "${RED}Unknown type '$VIDEO_TYPE'. Allowed: reel, story, short, video${NC}"
+    echo -e "${RED}ERROR: Unknown type '$VIDEO_TYPE'. Allowed: reel, story, short, video${NC}"
     exit 1
 fi
 
+# Validate directory
 if [ ! -d "$SOURCE_DIR" ]; then
-    echo -e "${RED}Directory '$SOURCE_DIR' does not exist${NC}"
-    exit 1
-fi
-
-if ! curl -sf "${API_BASE}/health" > /dev/null 2>&1; then
-    echo -e "${RED}API not responding at ${API_BASE}${NC}"
+    echo -e "${RED}ERROR: Directory '$SOURCE_DIR' does not exist${NC}"
     exit 1
 fi
 
 # ── Resolve account name → ID ───────────────────────────────────────
 
-ACCOUNTS_JSON=$(curl -sf -H "Authorization: Bearer ${API_TOKEN}" "${API_BASE}/api/accounts")
+ACCOUNTS=$(fetch_accounts)
+if [ -z "$ACCOUNTS" ]; then
+    echo -e "${RED}ERROR: Could not fetch accounts from ${SERVER}${NC}"
+    echo "Check your SMM_API_TOKEN and server availability."
+    exit 1
+fi
 
-MATCH=$(echo "$ACCOUNTS_JSON" | python3 -c "
-import sys, json, re
+MATCH=$(echo "$ACCOUNTS" | python3 -c "
+import sys, json
 
-query = re.sub(r'\s+', '', sys.argv[1].lower())
-video_type = sys.argv[2]
+query = '''${ACCOUNT_QUERY}'''.lower()
 accounts = json.load(sys.stdin)
-
-# Match ignoring spaces
-matches = [a for a in accounts if query in re.sub(r'\s+', '', a['name'].lower())]
-
-# If multiple matches with same name, pick by video_type
-if len(matches) > 1:
-    if video_type in ('reel', 'story'):
-        filtered = [a for a in matches if a['type'] == 'instagram_facebook']
-    elif video_type in ('short', 'video'):
-        filtered = [a for a in matches if a['type'] == 'youtube']
-    else:
-        filtered = matches
-    if len(filtered) == 1:
-        matches = filtered
+matches = [a for a in accounts if query in a['name'].lower()]
 
 if len(matches) == 0:
-    names = ', '.join(f\"{a['name']} ({a['type']})\" for a in accounts)
-    print(f'ERROR:No account matching \"{sys.argv[1]}\". Available: {names}')
+    print('ERROR:No account matching \"${ACCOUNT_QUERY}\"')
+    print('Available:', ', '.join(a['name'] for a in accounts))
 elif len(matches) > 1:
-    hits = ', '.join(f\"{a['name']} ({a['type']}, ID:{a['id']})\" for a in matches)
-    print(f'ERROR:Multiple matches: {hits}. Hint: use reel/story for IG+FB or short/video for YouTube.')
+    print('ERROR:Multiple matches: ' + ', '.join(f\"{a['name']} (ID:{a['id']})\" for a in matches))
 else:
     a = matches[0]
     print(f\"{a['id']}|{a['name']}|{a['type']}\")
-" "$ACCOUNT_QUERY" "$VIDEO_TYPE" 2>/dev/null)
+" 2>/dev/null)
 
 if [[ "$MATCH" == ERROR:* ]]; then
     echo -e "${RED}${MATCH#ERROR:}${NC}"
@@ -137,14 +149,14 @@ for ext in $SUPPORTED_FORMATS; do
 done
 
 if [ ${#VIDEO_FILES[@]} -eq 0 ]; then
-    echo -e "${YELLOW}No video files in ${SOURCE_DIR}${NC}"
+    echo -e "${YELLOW}No video files found in ${SOURCE_DIR}${NC}"
     exit 0
 fi
 
 # ── Header ───────────────────────────────────────────────────────────
 
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}  Social Media Manager - Bulk Upload${NC}"
+echo -e "${BLUE}  Social Media Manager - Upload${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
 echo -e "  Account:  ${GREEN}${ACCOUNT_NAME}${NC} (${ACCOUNT_TYPE}, ID: ${ACCOUNT_ID})"
 echo -e "  Source:   ${SOURCE_DIR}"
@@ -168,8 +180,9 @@ for i in "${!VIDEO_FILES[@]}"; do
     echo -ne "  [${NUM}/${TOTAL}] ${FILENAME} "
 
     CURL_ARGS=(
-        -sf -X POST
-        -H "Authorization: Bearer ${API_TOKEN}"
+        -sf
+        -X POST
+        -H "Authorization: Bearer ${TOKEN}"
         -F "files=@${VIDEO_FILE}"
         -F "video_type=${VIDEO_TYPE}"
     )
@@ -187,13 +200,13 @@ for i in "${!VIDEO_FILES[@]}"; do
     [ -n "$EXTRAS" ] && echo -ne "${CYAN}${EXTRAS}${NC}"
     echo -n "... "
 
-    RESPONSE=$(curl "${CURL_ARGS[@]}" "${API_BASE}/api/accounts/${ACCOUNT_ID}/videos/bulk-upload" 2>&1 || true)
+    RESPONSE=$(curl "${CURL_ARGS[@]}" "${SERVER}/accounts/${ACCOUNT_ID}/videos/bulk-upload" 2>&1 || true)
 
     if echo "$RESPONSE" | grep -q '"ok": true\|"ok":true'; then
         echo -e "${GREEN}OK${NC}"
         SUCCESS=$((SUCCESS + 1))
     else
-        ERROR=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('detail','') or d.get('results',[{}])[0].get('error','unknown'))" 2>/dev/null || echo "unknown error")
+        ERROR=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('detail','') or d.get('results',[{}])[0].get('error','unknown'))" 2>/dev/null || echo "$RESPONSE")
         echo -e "${RED}FAIL: ${ERROR}${NC}"
         FAILED=$((FAILED + 1))
     fi

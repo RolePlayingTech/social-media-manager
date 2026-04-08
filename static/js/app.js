@@ -301,8 +301,8 @@ async function renderQueue(container) {
             if (!isYT) {
                 const igOn = v.target_ig !== 0;
                 const fbOn = v.target_fb !== 0;
-                platformBadges = `<span class="platform-badge ig" style="${igOn ? '' : 'opacity:0.3'}" title="${igOn ? 'Instagram: TAK' : 'Instagram: NIE'}">IG</span>`
-                    + `<span class="platform-badge fb" style="${fbOn ? '' : 'opacity:0.3'}" title="${fbOn ? 'Facebook: TAK' : 'Facebook: NIE'}">FB</span>`;
+                platformBadges = `<span class="platform-badge ig clickable ${igOn ? '' : 'off'}" onclick="togglePlatform(event, ${v.id}, 'target_ig', ${igOn ? 'false' : 'true'})" title="Kliknij aby ${igOn ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107'} Instagram">IG</span>`
+                    + `<span class="platform-badge fb clickable ${fbOn ? '' : 'off'}" onclick="togglePlatform(event, ${v.id}, 'target_fb', ${fbOn ? 'false' : 'true'})" title="Kliknij aby ${fbOn ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107'} Facebook">FB</span>`;
             }
 
             html += `<div class="video-card" draggable="true" data-id="${v.id}"
@@ -324,6 +324,7 @@ async function renderQueue(container) {
                     </div>
                 </div>
                 <div class="video-actions">
+                    <button class="btn btn-sm" onclick="window.open('${thumb}', '_blank')" title="Otw\u00f3rz wideo">\u25b6</button>
                     <button class="btn btn-sm" onclick="showEditVideoModal(${v.id})">Edytuj</button>
                     <button class="btn btn-success btn-sm" onclick="publishNow(${v.id})">Publikuj</button>
                     <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'up', ${currentAccountId})" ${i === 0 ? 'disabled' : ''}>\u2191</button>
@@ -337,6 +338,16 @@ async function renderQueue(container) {
         container.innerHTML = html;
     } catch (e) {
         container.innerHTML = `<div class="tab-content active"><p style="color:var(--red)">B\u0142\u0105d: ${e.message}</p></div>`;
+    }
+}
+
+async function togglePlatform(event, videoId, field, value) {
+    event.stopPropagation();
+    try {
+        await api('PUT', `/videos/${videoId}`, { [field]: value });
+        await renderQueue(document.getElementById('tab-content-area'));
+    } catch (e) {
+        toast('B\u0142\u0105d: ' + e.message, 'error');
     }
 }
 
@@ -664,6 +675,24 @@ async function doUpload() {
 
 // ── Schedule Tab ────────────────────────────────────────────────────
 
+function buildHourOptions(selected) {
+    let opts = '';
+    for (let h = 0; h < 24; h++) {
+        const val = String(h).padStart(2, '0');
+        opts += `<option value="${val}" ${val === selected ? 'selected' : ''}>${val}</option>`;
+    }
+    return opts;
+}
+
+function buildMinuteOptions(selected) {
+    let opts = '';
+    for (let m = 0; m < 60; m += 5) {
+        const val = String(m).padStart(2, '0');
+        opts += `<option value="${val}" ${val === selected ? 'selected' : ''}>${val}</option>`;
+    }
+    return opts;
+}
+
 async function renderSchedule(container) {
     try {
         const schedule = await api('GET', `/accounts/${currentAccountId}/schedule`);
@@ -674,40 +703,44 @@ async function renderSchedule(container) {
         const daysEn = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
         const activeDays = schedule.day_of_week === '*' ? daysEn : schedule.day_of_week.split(',').map(d => d.trim());
 
-        const times = schedule.publish_times || [];
+        const times = (schedule.publish_times || []).slice().sort();
 
         let html = `<div class="tab-content active">
             <div class="schedule-panel">
-                <h3>\u{1F553} Harmonogram publikacji</h3>
+                <h3>Harmonogram publikacji</h3>
+
                 <div class="schedule-row" style="margin-bottom:16px">
                     <div class="schedule-field">
                         <label>Dni tygodnia</label>
                         <div class="days-selector">
-                            ${days.map((d, i) => `<button class="day-btn ${activeDays.includes(daysEn[i]) || schedule.day_of_week === '*' ? 'active' : ''}"
+                            ${days.map((d, i) => `<button type="button" class="day-btn ${activeDays.includes(daysEn[i]) ? 'active' : ''}"
                                 data-day="${daysEn[i]}" onclick="toggleDay(this)">${d}</button>`).join('')}
                         </div>
                     </div>
                     <div class="schedule-field">
-                        <label>Max dzie\u0144nie</label>
-                        <input type="number" id="sched-max" value="${schedule.max_per_day}" min="1" max="20" style="width:70px">
-                    </div>
-                    <div class="schedule-field">
-                        <label>W\u0142\u0105czony</label>
+                        <label>Aktywny</label>
                         <select id="sched-enabled">
                             <option value="1" ${schedule.enabled ? 'selected' : ''}>Tak</option>
                             <option value="0" ${!schedule.enabled ? 'selected' : ''}>Nie</option>
                         </select>
                     </div>
                 </div>
-                <div class="schedule-row" style="margin-bottom:16px">
-                    <div class="schedule-field" style="flex:1">
-                        <label>Godziny publikacji</label>
-                        <div class="schedule-times" id="sched-times">
-                            ${times.map(t => `<div class="time-tag">${t}<span class="remove-time" onclick="removeTime(this, '${t}')">\u00d7</span></div>`).join('')}
-                            <input type="time" id="sched-new-time" style="width:120px;padding:4px 8px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);font-family:var(--font-mono)">
-                            <button class="btn btn-sm" onclick="addTime()">+</button>
-                        </div>
+
+                <div class="schedule-section" style="margin-bottom:16px">
+                    <label class="schedule-section-label">Godziny publikacji (ka\u017cda = 1 film)</label>
+                    <div id="sched-times-list">
+                        ${times.map((t, idx) => {
+                            const [h, m] = t.split(':');
+                            return `<div class="time-slot" data-idx="${idx}">
+                                <select class="time-hour">${buildHourOptions(h)}</select>
+                                <span class="time-sep">:</span>
+                                <select class="time-minute">${buildMinuteOptions(m)}</select>
+                                <button type="button" class="btn-remove-time" onclick="removeTimeSlot(this)" title="Usu\u0144">\u00d7</button>
+                            </div>`;
+                        }).join('')}
                     </div>
+                    <button type="button" class="btn btn-sm" onclick="addTimeSlot()" style="margin-top:8px">+ Dodaj godzin\u0119</button>
+                    <div class="schedule-hint" id="sched-summary"></div>
                 </div>`;
 
         if (!isYT) {
@@ -741,11 +774,11 @@ async function renderSchedule(container) {
         const jobs = await api('GET', '/scheduler/jobs');
         const myJobs = jobs.filter(j => j.account_id === currentAccountId);
         if (myJobs.length > 0) {
-            html += `<h3 style="font-size:14px;margin-bottom:12px">Aktywne zadania</h3>
+            html += `<h3 style="font-size:14px;margin-bottom:12px">Aktywne zadania schedulera</h3>
                 <div class="scheduler-grid">`;
             for (const j of myJobs) {
                 html += `<div class="scheduler-card">
-                    <h4>${esc(j.account_name)} \u2022 ${j.time}</h4>
+                    <h4>${j.time}</h4>
                     <div class="detail">Nast\u0119pne: ${j.next_run ? fmtDate(j.next_run) : 'N/A'}</div>
                 </div>`;
             }
@@ -754,6 +787,7 @@ async function renderSchedule(container) {
 
         html += '</div>';
         container.innerHTML = html;
+        updateSchedSummary();
     } catch (e) {
         container.innerHTML = `<div class="tab-content active"><p style="color:var(--red)">B\u0142\u0105d: ${e.message}</p></div>`;
     }
@@ -761,35 +795,70 @@ async function renderSchedule(container) {
 
 function toggleDay(btn) {
     btn.classList.toggle('active');
+    updateSchedSummary();
 }
 
-function removeTime(el, time) {
-    el.parentElement.remove();
+function addTimeSlot() {
+    const list = document.getElementById('sched-times-list');
+    const div = document.createElement('div');
+    div.className = 'time-slot';
+    div.innerHTML = `
+        <select class="time-hour">${buildHourOptions('12')}</select>
+        <span class="time-sep">:</span>
+        <select class="time-minute">${buildMinuteOptions('00')}</select>
+        <button type="button" class="btn-remove-time" onclick="removeTimeSlot(this)" title="Usu\u0144">\u00d7</button>
+    `;
+    list.appendChild(div);
+    updateSchedSummary();
 }
 
-function addTime() {
-    const input = document.getElementById('sched-new-time');
-    const time = input.value;
-    if (!time) return;
-    const container = document.getElementById('sched-times');
-    const tag = document.createElement('div');
-    tag.className = 'time-tag';
-    tag.innerHTML = `${time}<span class="remove-time" onclick="removeTime(this, '${time}')">\u00d7</span>`;
-    container.insertBefore(tag, input);
-    input.value = '';
+function removeTimeSlot(btn) {
+    btn.closest('.time-slot').remove();
+    updateSchedSummary();
+}
+
+function getScheduleTimes() {
+    return Array.from(document.querySelectorAll('.time-slot')).map(slot => {
+        const h = slot.querySelector('.time-hour').value;
+        const m = slot.querySelector('.time-minute').value;
+        return `${h}:${m}`;
+    }).sort();
+}
+
+function updateSchedSummary() {
+    const el = document.getElementById('sched-summary');
+    if (!el) return;
+    const times = getScheduleTimes();
+    const dayCount = document.querySelectorAll('.day-btn.active').length;
+    if (times.length === 0) {
+        el.textContent = 'Brak godzin \u2014 automatyczne publikowanie wy\u0142\u0105czone';
+    } else {
+        el.textContent = `${times.length} film${times.length === 1 ? '' : times.length < 5 ? 'y' : '\u00f3w'} dziennie \u00d7 ${dayCount} dni = ${times.length * dayCount} tygodniowo`;
+    }
 }
 
 async function saveSchedule() {
     const activeDays = Array.from(document.querySelectorAll('.day-btn.active')).map(b => b.dataset.day);
-    const times = Array.from(document.querySelectorAll('.time-tag')).map(t => t.textContent.replace('\u00d7', '').trim());
-    const maxPerDay = parseInt(document.getElementById('sched-max').value) || 2;
+    const times = getScheduleTimes();
     const enabled = document.getElementById('sched-enabled').value === '1';
+
+    if (times.length === 0 && enabled) {
+        toast('Dodaj przynajmniej jedn\u0105 godzin\u0119 publikacji', 'error');
+        return;
+    }
+
+    // Check for duplicate times
+    const unique = [...new Set(times)];
+    if (unique.length !== times.length) {
+        toast('Usun\u0105\u0142e\u015b zduplikowane godziny', 'error');
+        return;
+    }
 
     try {
         await api('PUT', `/accounts/${currentAccountId}/schedule`, {
             day_of_week: activeDays.length === 7 ? '*' : activeDays.join(','),
             publish_times: times,
-            max_per_day: maxPerDay,
+            max_per_day: times.length,
             enabled: enabled,
         });
 

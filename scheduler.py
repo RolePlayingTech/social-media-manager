@@ -18,7 +18,8 @@ logger = logging.getLogger("scheduler")
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 
-scheduler = BackgroundScheduler(timezone="Europe/Warsaw")
+TIMEZONE = os.environ.get("SMM_TIMEZONE", "Europe/Warsaw")
+scheduler = BackgroundScheduler(timezone=TIMEZONE)
 _active_jobs = {}
 
 
@@ -160,7 +161,7 @@ def build_jobs():
                 job_id = f"publish_{account['id']}_{time_str.replace(':', '')}"
                 scheduler.add_job(
                     process_account_publish,
-                    CronTrigger(hour=int(hour), minute=int(minute), timezone="Europe/Warsaw"),
+                    CronTrigger(hour=int(hour), minute=int(minute), timezone=TIMEZONE),
                     args=[account["id"]],
                     id=job_id,
                     replace_existing=True,

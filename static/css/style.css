@@ -449,32 +449,77 @@ body {
 .schedule-field input:focus,
 .schedule-field select:focus { border-color: var(--border-hover); }
 
-.schedule-times {
+.schedule-section {
     display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    align-items: center;
+    flex-direction: column;
+    gap: 4px;
 }
 
-.time-tag {
-    display: inline-flex;
+.schedule-section-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.schedule-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 8px;
+}
+
+#sched-times-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.time-slot {
+    display: flex;
     align-items: center;
     gap: 4px;
-    padding: 4px 10px;
-    background: var(--bg-card);
+}
+
+.time-slot select {
+    padding: 6px 8px;
+    background: var(--bg-input);
     border: 1px solid var(--border);
+    color: var(--text);
     font-family: var(--font-mono);
-    font-size: 13px;
-}
-
-.time-tag .remove-time {
-    cursor: pointer;
-    color: var(--text-muted);
     font-size: 14px;
-    line-height: 1;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+    min-width: 56px;
+    text-align: center;
 }
 
-.time-tag .remove-time:hover { color: var(--red); }
+.time-slot select:focus { border-color: var(--border-hover); }
+
+.time-sep {
+    color: var(--text-muted);
+    font-size: 16px;
+    font-weight: bold;
+    padding: 0 2px;
+}
+
+.btn-remove-time {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 2px 8px;
+    line-height: 1;
+    margin-left: 4px;
+}
+
+.btn-remove-time:hover {
+    color: var(--red);
+    border-color: var(--red);
+}
 
 .platform-toggles {
     display: flex;
@@ -632,6 +677,11 @@ body {
 .platform-badge.fb { background: var(--blue); color: #fff; opacity: 0.8; }
 .platform-badge.yt { background: var(--red); color: #fff; opacity: 0.8; }
 .platform-badge.story { background: var(--yellow); color: #000; opacity: 0.8; }
+
+.platform-badge.clickable { cursor: pointer; transition: opacity 0.15s; }
+.platform-badge.clickable:hover { opacity: 1; }
+.platform-badge.off { opacity: 0.2; }
+.platform-badge.clickable.off:hover { opacity: 0.5; }
 
 /* ── Status Badges ── */
 

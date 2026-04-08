@@ -29,8 +29,8 @@ set -euo pipefail
 
 # ── Konfiguracja (dostosuj do siebie) ────────────────────────────────
 
-SERVER="admin@roleplayingtech.com"
-REMOTE_BASE="/var/www/roleplayingtech.com/html/social-admin-v2"
+SERVER="${SMM_SSH_HOST:?Set SMM_SSH_HOST (e.g. user@yourserver.com)}"
+REMOTE_BASE="${SMM_REMOTE_PATH:-/opt/social-media-manager}"
 REMOTE_TMP="/tmp/smm_upload_$$"
 
 # ── Kolory ───────────────────────────────────────────────────────────
