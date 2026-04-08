@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Social Media Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/social-admin-v2/static/css/style.css">
+</head>
+<body>
+    <!-- Login Screen -->
+    <div class="login-screen" id="login-screen">
+        <div class="login-box">
+            <h1>Social Media Manager</h1>
+            <p>Panel zarządzania kontami</p>
+            <input type="password" id="login-password" placeholder="Hasło" autocomplete="off">
+            <button onclick="doLogin()">Zaloguj</button>
+            <div class="login-error" id="login-error"></div>
+        </div>
+    </div>
+
+    <!-- Main App -->
+    <div class="app" id="app" style="display:none">
+        <!-- Sidebar -->
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h1>SMM</h1>
+                <div class="subtitle">Social Media Manager</div>
+            </div>
+            <div id="sidebar-accounts"></div>
+            <div class="sidebar-footer">
+                <button class="btn-add-account" onclick="showAddAccountModal()">+ Dodaj konto</button>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content" id="main-content">
+            <div class="no-account-view">
+                <div>
+                    <h2>Social Media Manager</h2>
+                    <p>Wybierz konto z panelu bocznego lub dodaj nowe</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal-overlay" id="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modal-title"></h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-footer" id="modal-footer"></div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toasts"></div>
+
+    <!-- Publish Status Bar -->
+    <div class="publish-bar" id="publish-bar">
+        <div class="spinner"></div>
+        <span id="publish-bar-text">Publikowanie...</span>
+    </div>
+
+    <script src="/social-admin-v2/static/js/app.js"></script>
+</body>
+</html>

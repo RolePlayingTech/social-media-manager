@@ -1,0 +1,15 @@
+# Secrets & credentials
+.env
+*.sqlite3
+
+# Runtime data
+uploads/
+app.log
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+social-media-manager.service
+nginx.conf

@@ -1,0 +1,17 @@
+[Unit]
+Description=Social Media Manager API
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/path/to/social-admin-v2
+ExecStart=/usr/bin/python3 /path/to/social-admin-v2/api.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/path/to/social-admin-v2/.env
+
+[Install]
+WantedBy=multi-user.target
