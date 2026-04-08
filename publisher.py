@@ -207,8 +207,9 @@ def publish_story_to_instagram(access_token: str, ig_user_id: str, video_url: st
 # ── Facebook Publishing ─────────────────────────────────────────────
 
 def publish_to_facebook(access_token: str, page_id: str, video_path: str, description: str) -> dict:
-    """Publish a video to Facebook Page via curl (bypasses httpx multipart issues)."""
+    """Publish a video to Facebook Page via curl with config file (no token in ps)."""
     import subprocess
+    import tempfile
     try:
         # Get Page Access Token
         with httpx.Client(timeout=30) as client:
@@ -218,16 +219,23 @@ def publish_to_facebook(access_token: str, page_id: str, video_path: str, descri
             })
             page_token = resp.json().get("access_token", access_token)
 
-        # Upload via curl to /{page_id}/videos
-        result = subprocess.run([
-            "curl", "-s", "--show-error",
-            "-F", f"access_token={page_token}",
-            "-F", f"description={description}",
-            "-F", f"source=@{video_path};type=video/mp4",
-            f"{GRAPH_API_BASE}/{page_id}/videos",
-        ], capture_output=True, text=True, timeout=300)
+        # Write curl config to temp file (keeps token and description out of ps aux)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".curl", delete=False) as cf:
+            cf.write(f'-F "access_token={page_token}"\n')
+            cf.write(f'-F "description={description}"\n')
+            cf.write(f'-F "source=@{video_path};type=video/mp4"\n')
+            config_path = cf.name
 
-        logger.info(f"FB curl stdout: {result.stdout[:500]}")
+        try:
+            result = subprocess.run([
+                "curl", "-s", "--show-error",
+                "-K", config_path,
+                f"{GRAPH_API_BASE}/{page_id}/videos",
+            ], capture_output=True, text=True, timeout=300)
+        finally:
+            os.remove(config_path)
+
+        logger.info(f"FB curl response: {result.stdout[:500]}")
         if result.stderr:
             logger.error(f"FB curl stderr: {result.stderr[:500]}")
 
@@ -244,8 +252,8 @@ def publish_to_facebook(access_token: str, page_id: str, video_path: str, descri
 
         # FB sometimes returns error code 1 (rate limit) but still processes the upload
         error = data.get("error", {})
-        if error.get("code") == 1 and error.get("is_transient", True):
-            logger.warning(f"FB returned transient error but upload may have succeeded")
+        if error.get("code") == 1:
+            logger.warning(f"FB returned rate-limit error — upload may have succeeded")
             return {
                 "success": True,
                 "video_id": "pending",
@@ -329,7 +337,11 @@ def _get_yt_access_token(client_id: str, client_secret: str, refresh_token: str)
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         })
-        return resp.json().get("access_token")
+        data = resp.json()
+        if "error" in data:
+            logger.error(f"YouTube token refresh failed: {data.get('error')} - {data.get('error_description', '')}")
+            return None
+        return data.get("access_token")
 
 
 def publish_to_youtube(client_id: str, client_secret: str, refresh_token: str,

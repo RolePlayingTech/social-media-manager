@@ -395,19 +395,26 @@ def reorder_videos(account_id: int, video_ids: list):
 
 
 def get_next_queued_video(account_id: int):
+    """Atomically claim the next queued video by setting status to 'publishing'."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM videos WHERE account_id = ? AND status = 'queued' ORDER BY queue_position ASC LIMIT 1",
+            "UPDATE videos SET status = 'publishing', updated_at = datetime('now') "
+            "WHERE id = (SELECT id FROM videos WHERE account_id = ? AND status = 'queued' "
+            "ORDER BY queue_position ASC LIMIT 1) RETURNING *",
             (account_id,)
         ).fetchone()
         return dict(row) if row else None
 
 
-def count_published_today(account_id: int) -> int:
+def count_published_today(account_id: int, timezone: str = "Europe/Warsaw") -> int:
+    """Count videos published today in the configured timezone."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    today_str = _dt.now(ZoneInfo(timezone)).strftime("%Y-%m-%d")
     with get_db() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) FROM videos WHERE account_id = ? AND status = 'published' AND date(published_at) = date('now')",
-            (account_id,)
+            "SELECT COUNT(*) FROM videos WHERE account_id = ? AND status = 'published' AND date(published_at) = ?",
+            (account_id, today_str)
         ).fetchone()
         return row[0]
 

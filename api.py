@@ -6,6 +6,7 @@ FastAPI backend for managing social media accounts, videos, and publishing.
 import os
 import sys
 import json
+import time
 import uuid
 import shutil
 import logging
@@ -76,6 +77,11 @@ async def lifespan(app):
     db.init_db()
     seed_accounts()
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    # Recover videos stuck in "publishing" after crash/restart
+    with db.get_db() as conn:
+        stuck = conn.execute("UPDATE videos SET status = 'queued' WHERE status = 'publishing'").rowcount
+        if stuck:
+            logger.warning(f"Recovered {stuck} videos stuck in 'publishing' status")
     sched.start()
     logger.info("Social Media Manager API started")
     yield
@@ -415,16 +421,15 @@ async def delete_video(video_id: int):
     video = db.get_video(video_id)
     if not video:
         raise HTTPException(404, "Video not found")
-    # Delete file
-    video_path = os.path.join(UPLOAD_DIR, str(video["account_id"]), "queue", video["filename"])
-    if os.path.exists(video_path):
-        os.remove(video_path)
-    caption_path = video_path.rsplit(".", 1)[0] + ".txt"
-    if os.path.exists(caption_path):
-        os.remove(caption_path)
-    srt_path = video_path.rsplit(".", 1)[0] + ".srt"
-    if os.path.exists(srt_path):
-        os.remove(srt_path)
+    # Delete files from both queue and archive
+    for subdir in ("queue", "archive"):
+        video_path = os.path.join(UPLOAD_DIR, str(video["account_id"]), subdir, video["filename"])
+        if os.path.exists(video_path):
+            os.remove(video_path)
+        for ext in (".txt", ".srt"):
+            extra = video_path.rsplit(".", 1)[0] + ext
+            if os.path.exists(extra):
+                os.remove(extra)
     db.delete_video(video_id)
     return {"ok": True}
 
@@ -490,7 +495,7 @@ async def upload_video(
     # Save caption to .txt file
     if caption:
         caption_path = dest_path.rsplit(".", 1)[0] + ".txt"
-        with open(caption_path, "w") as f:
+        with open(caption_path, "w", encoding="utf-8") as f:
             f.write(caption)
 
     # Save subtitle .srt file
@@ -581,17 +586,25 @@ async def bulk_upload(
             results.append({"filename": file.filename, "error": "Invalid filename"})
             continue
 
-        content = await file.read()
-        file_size = len(content)
+        file_size = 0
+        await file.seek(0)
+        with open(dest_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                file_size += len(chunk)
+                if file_size > MAX_UPLOAD_SIZE:
+                    break
+                f.write(chunk)
         if file_size > MAX_UPLOAD_SIZE:
+            os.remove(dest_path)
             results.append({"filename": file.filename, "error": "Too large"})
             continue
         if file_size == 0:
+            os.remove(dest_path)
             results.append({"filename": file.filename, "error": "Empty file"})
             continue
-
-        with open(dest_path, "wb") as f:
-            f.write(content)
 
         # Look for matching caption
         file_base = file.filename.rsplit(".", 1)[0]
@@ -641,6 +654,14 @@ async def publish_now(video_id: int):
     account = db.get_account(video["account_id"])
     if not account:
         raise HTTPException(404, "Account not found")
+
+    # Clean old publish jobs to prevent memory leak
+    if len(publish_jobs) > 50:
+        for old_key in list(publish_jobs.keys())[:-20]:
+            del publish_jobs[old_key]
+
+    # Mark video as publishing atomically
+    db.update_video(video_id, {"status": "publishing"})
 
     job_id = str(uuid.uuid4())
     publish_jobs[job_id] = {"status": "started", "video_id": video_id, "messages": []}
@@ -731,8 +752,17 @@ YT_OAUTH_SCOPES = [
 ]
 YT_REDIRECT_URI = os.environ.get("SMM_YT_REDIRECT_URI", "http://localhost:8902/api/youtube/oauth/callback")
 
-# In-memory state for OAuth CSRF protection
+# In-memory state for OAuth CSRF protection (state -> (account_id, created_at))
 _oauth_states: dict = {}
+_OAUTH_STATE_TTL = 600  # 10 minutes
+
+
+def _cleanup_oauth_states():
+    """Remove expired OAuth states."""
+    now = time.time()
+    expired = [k for k, v in _oauth_states.items() if now - v[1] > _OAUTH_STATE_TTL]
+    for k in expired:
+        del _oauth_states[k]
 
 
 @app.get("/api/youtube/oauth/start", dependencies=[Depends(verify_token)])
@@ -744,8 +774,9 @@ async def youtube_oauth_start(account_id: int):
     if not account.get("yt_client_id") or not account.get("yt_client_secret"):
         raise HTTPException(400, "Set Client ID and Client Secret first in account settings")
 
+    _cleanup_oauth_states()
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = account_id
+    _oauth_states[state] = (account_id, time.time())
 
     params = urlencode({
         "client_id": account["yt_client_id"],
@@ -764,10 +795,11 @@ async def youtube_oauth_callback(code: str = "", state: str = "", error: str = "
     """Receive OAuth callback from Google, exchange code for tokens."""
     if error:
         return JSONResponse({"error": error}, status_code=400)
+    _cleanup_oauth_states()
     if state not in _oauth_states:
-        return JSONResponse({"error": "Invalid state parameter. Please start OAuth again."}, status_code=400)
+        return JSONResponse({"error": "Invalid or expired state parameter. Please start OAuth again."}, status_code=400)
 
-    account_id = _oauth_states.pop(state)
+    account_id, _ = _oauth_states.pop(state)
     account = db.get_account(account_id)
     if not account:
         return JSONResponse({"error": "Account not found"}, status_code=404)

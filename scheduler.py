@@ -43,13 +43,13 @@ def process_account_publish(account_id: int):
             return
 
     # Check daily limit
-    published_today = db.count_published_today(account_id)
+    published_today = db.count_published_today(account_id, TIMEZONE)
     max_per_day = schedule.get("max_per_day", 2)
     if published_today >= max_per_day:
         logger.info(f"Account {account_id}: daily limit reached ({published_today}/{max_per_day})")
         return
 
-    # Get next video
+    # Atomically claim next video (prevents double-publish race condition)
     video = db.get_next_queued_video(account_id)
     if not video:
         logger.info(f"Account {account_id}: no queued videos")
@@ -67,14 +67,21 @@ def do_publish(account: dict, video: dict):
         db.update_video(video["id"], {"status": "failed", "error_message": "File not found"})
         return
 
-    # Mark as publishing
-    db.update_video(video["id"], {"status": "publishing"})
+    # Status already set to 'publishing' by atomic claim in get_next_queued_video()
 
     try:
         results = publisher.publish_video(account, video, video_path)
-        all_success = all(r.get("success") for r in results.values()) if results else False
 
         update_data = {"published_at": datetime.now().isoformat()}
+
+        if not results:
+            update_data["status"] = "failed"
+            update_data["error_message"] = "No platforms configured for publishing"
+            logger.error(f"Video {video['id']}: no platforms configured")
+            db.update_video(video["id"], update_data)
+            return
+
+        all_success = all(r.get("success") for r in results.values())
 
         if all_success:
             update_data["status"] = "published"
@@ -89,10 +96,16 @@ def do_publish(account: dict, video: dict):
                 update_data["yt_video_id"] = results["youtube"].get("video_id")
                 update_data["yt_url"] = results["youtube"].get("url")
 
-            # Move to archive
+            # Move to archive (avoid overwriting existing files)
             archive_dir = os.path.join(UPLOAD_DIR, str(account["id"]), "archive")
             os.makedirs(archive_dir, exist_ok=True)
             archive_path = os.path.join(archive_dir, video["filename"])
+            if os.path.exists(archive_path):
+                base, ext = os.path.splitext(video["filename"])
+                counter = 1
+                while os.path.exists(archive_path):
+                    archive_path = os.path.join(archive_dir, f"{base}_{counter}{ext}")
+                    counter += 1
             shutil.move(video_path, archive_path)
 
             # Move caption and subtitle files too if they exist
