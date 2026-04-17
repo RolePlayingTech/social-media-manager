@@ -583,16 +583,37 @@ body {
 .video-card.drag-over { border-top: 2px solid var(--accent); }
 
 .video-position {
-    font-family: var(--font-mono);
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text-muted);
     text-align: center;
     cursor: grab;
     user-select: none;
 }
 
 .video-position:active { cursor: grabbing; }
+
+.pos-input {
+    width: 38px;
+    padding: 2px 4px;
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    text-align: center;
+    -moz-appearance: textfield;
+    cursor: grab;
+}
+.pos-input::-webkit-outer-spin-button,
+.pos-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.pos-input:hover { border-color: var(--border); background: var(--bg); }
+.pos-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--bg);
+    color: var(--text);
+    cursor: text;
+}
 
 .video-thumbnail {
     width: 90px;

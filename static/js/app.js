@@ -308,7 +308,13 @@ async function renderQueue(container) {
             html += `<div class="video-card" draggable="true" data-id="${v.id}"
                         ondragstart="dragStart(event)" ondragover="dragOver(event)"
                         ondrop="drop(event)" ondragend="dragEnd(event)" ondragleave="dragLeave(event)">
-                <div class="video-position">${i + 1}</div>
+                <div class="video-position">
+                    <input type="number" class="pos-input" value="${i + 1}" min="1" max="${videos.length}"
+                           title="Wpisz numer pozycji"
+                           onkeydown="if(event.key==='Enter'){moveVideoToPos(${v.id},this.value,${videos.length});this.blur()}"
+                           onblur="moveVideoToPos(${v.id},this.value,${videos.length})"
+                           data-orig="${i + 1}">
+                </div>
                 <div class="video-thumbnail">
                     <video src="${thumb}#t=0.5" preload="metadata" muted
                            onclick="this.paused ? this.play() : this.pause()"></video>
@@ -1158,6 +1164,23 @@ async function moveVideo(videoId, direction, accountId) {
         switchTab('queue');
     } catch (e) {
         toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}
+
+async function moveVideoToPos(videoId, newPosStr, total) {
+    const newPos = parseInt(newPosStr);
+    if (isNaN(newPos) || newPos < 1 || newPos > total) return;
+    try {
+        const videos = await api('GET', `/accounts/${currentAccountId}/videos?status=queued`);
+        const ids = videos.map(v => v.id);
+        const fromIdx = ids.indexOf(videoId);
+        if (fromIdx === -1 || fromIdx === newPos - 1) return;
+        ids.splice(fromIdx, 1);
+        ids.splice(newPos - 1, 0, videoId);
+        await api('POST', `/accounts/${currentAccountId}/videos/reorder`, { video_ids: ids });
+        switchTab('queue');
+    } catch (e) {
+        toast('Błąd: ' + e.message, 'error');
     }
 }
 

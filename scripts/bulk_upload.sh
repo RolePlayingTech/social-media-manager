@@ -48,6 +48,12 @@ for a in json.load(sys.stdin):
     types = 'reel/story' if t == 'IG+FB' else 'short/video'
     print(f\"  [{a['id']}] {a['name']}  ({t})  — {q} queued  [{types}]\")
 "
+    echo ""
+    echo -e "${BLUE}ASCII aliases (use these from SSH/PowerShell):${NC}"
+    echo "  swiadek-dziejow  → Świadek Dziejów"
+    echo "  swiadek-jutra    → Świadek Jutra"
+    echo "  roleplayinglife  → RolePlayingLife"
+    echo "  rpl              → RolePlayingLife"
     exit 0
 fi
 
@@ -63,7 +69,18 @@ if [ $# -lt 2 ]; then
     exit 1
 fi
 
-ACCOUNT_QUERY="$1"
+# ── ASCII aliases for accounts with special characters ──────────────
+# Avoids encoding issues when calling via SSH from Windows/PowerShell
+declare -A ALIASES=(
+    ["swiadek-dziejow"]="Świadek Dziejów"
+    ["swiadek-jutra"]="Świadek Jutra"
+    ["roleplayinglife"]="RolePlayingLife"
+    ["rpl"]="RolePlayingLife"
+)
+
+INPUT_QUERY="$1"
+ALIAS_KEY=$(echo "$INPUT_QUERY" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+ACCOUNT_QUERY="${ALIASES[$ALIAS_KEY]:-$INPUT_QUERY}"
 SOURCE_DIR="$2"
 VIDEO_TYPE="${3:-reel}"
 
@@ -205,6 +222,13 @@ echo ""
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
 echo -e "  Result: ${GREEN}${SUCCESS} OK${NC} / ${RED}${FAILED} failed${NC} / ${TOTAL} total"
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+
+# Clean up source directory after successful upload
+if [ $FAILED -eq 0 ] && [ "$SOURCE_DIR" = "/tmp/upload" ] || [ "$SOURCE_DIR" = "/tmp/upload/" ]; then
+    rm -f "${SOURCE_DIR}"/*.mp4 "${SOURCE_DIR}"/*.mov "${SOURCE_DIR}"/*.avi "${SOURCE_DIR}"/*.mkv "${SOURCE_DIR}"/*.webm
+    rm -f "${SOURCE_DIR}"/*.txt "${SOURCE_DIR}"/*.srt
+    echo -e "  ${CYAN}Cleaned up ${SOURCE_DIR}${NC}"
+fi
 
 [ $FAILED -gt 0 ] && exit 1
 exit 0
