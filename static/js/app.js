@@ -1254,7 +1254,7 @@ async function copyVideoToAccount(videoId, targetAccountId) {
 
 // ── Comments Tab ────────────────────────────────────────────────────
 
-let commentsFilter = 'no_reply';
+let commentsFilter = 'unsent';
 
 async function renderComments(container) {
     try {
@@ -1265,11 +1265,11 @@ async function renderComments(container) {
             api('GET', '/ai-settings').catch(() => null),
         ]);
 
+        const unsent = (stats.no_reply || 0) + (stats.drafts || 0) + (stats.failed || 0);
         const filters = [
+            { key: 'unsent', label: 'Do wysłania', count: unsent },
             { key: 'all', label: 'Wszystkie', count: stats.total },
-            { key: 'no_reply', label: 'Bez odpowiedzi', count: stats.no_reply },
-            { key: 'week_no_reply', label: 'Tydzień bez odp.', count: null },
-            { key: 'oldest_no_reply', label: 'Najstarsze bez odp.', count: null },
+            { key: 'no_reply', label: 'Bez draftu', count: stats.no_reply },
             { key: 'draft', label: 'Wersje robocze', count: stats.drafts },
             { key: 'sent', label: 'Wysłane', count: stats.sent },
             { key: 'failed', label: 'Błędy', count: stats.failed },

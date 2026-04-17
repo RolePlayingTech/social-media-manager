@@ -594,7 +594,9 @@ def get_comments(account_id: int, reply_status: str = None, platform: str = None
     with get_db() as conn:
         query = "SELECT * FROM comments WHERE account_id = ?"
         params = [account_id]
-        if reply_status == "no_reply":
+        if reply_status == "unsent":
+            query += " AND reply_status != 'sent' AND has_owner_reply = 0"
+        elif reply_status == "no_reply":
             query += " AND reply_status = 'none' AND has_owner_reply = 0"
         elif reply_status == "draft":
             query += " AND reply_status IN ('draft', 'edited')"

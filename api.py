@@ -1267,7 +1267,9 @@ async def list_comments(account_id: int, filter: str = "all", platform: str = No
     from datetime import datetime as _dt
     since = None
     reply_status = None
-    if filter == "no_reply":
+    if filter == "unsent":
+        reply_status = "unsent"
+    elif filter == "no_reply":
         reply_status = "no_reply"
     elif filter == "week_no_reply":
         reply_status = "no_reply"
