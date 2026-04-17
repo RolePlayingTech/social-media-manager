@@ -137,6 +137,62 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_videos_queue ON videos(account_id, status, queue_position);
             CREATE INDEX IF NOT EXISTS idx_publish_log_video ON publish_log(video_id);
             CREATE INDEX IF NOT EXISTS idx_schedules_account ON schedules(account_id);
+
+            -- AI settings (global, one row per provider)
+            CREATE TABLE IF NOT EXISTS ai_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL CHECK(provider IN ('anthropic', 'openai', 'google')),
+                api_key TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                active BOOLEAN DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(provider)
+            );
+
+            -- Per-account reply tone settings
+            CREATE TABLE IF NOT EXISTS comment_tones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                tone_preset TEXT DEFAULT 'friendly',
+                custom_tone TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(account_id)
+            );
+
+            -- Comments fetched from platforms
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                platform TEXT NOT NULL CHECK(platform IN ('youtube', 'instagram', 'facebook')),
+                platform_comment_id TEXT NOT NULL,
+                platform_video_id TEXT,
+                platform_parent_id TEXT,
+                video_title TEXT DEFAULT '',
+                video_description TEXT DEFAULT '',
+                video_url TEXT DEFAULT '',
+                commenter_name TEXT DEFAULT '',
+                commenter_profile_url TEXT DEFAULT '',
+                comment_text TEXT NOT NULL,
+                comment_date TEXT,
+                like_count INTEGER DEFAULT 0,
+                has_owner_reply BOOLEAN DEFAULT 0,
+                reply_text TEXT,
+                reply_status TEXT DEFAULT 'none' CHECK(reply_status IN ('none', 'draft', 'edited', 'sending', 'sent', 'failed')),
+                reply_sent_at TEXT,
+                reply_platform_id TEXT,
+                reply_error TEXT,
+                ai_generated BOOLEAN DEFAULT 0,
+                fetched_at TEXT DEFAULT (datetime('now')),
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(account_id, platform_comment_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_comments_account ON comments(account_id, platform);
+            CREATE INDEX IF NOT EXISTS idx_comments_reply_status ON comments(account_id, reply_status);
+            CREATE INDEX IF NOT EXISTS idx_comments_video ON comments(account_id, platform_video_id);
         """)
 
 
@@ -488,3 +544,169 @@ def get_global_stats():
             "total_published": total_published,
             "total_accounts": total_accounts,
         }
+
+
+# ── Comments ───────────────────────────────────────────────────────
+
+def upsert_comment(data: dict) -> dict:
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT * FROM comments WHERE account_id = ? AND platform_comment_id = ?",
+            (data["account_id"], data["platform_comment_id"])
+        ).fetchone()
+        if existing:
+            return dict(existing)
+        conn.execute("""
+            INSERT INTO comments (account_id, platform, platform_comment_id, platform_video_id,
+                platform_parent_id, video_title, video_description, video_url,
+                commenter_name, commenter_profile_url, comment_text, comment_date,
+                like_count, has_owner_reply)
+            VALUES (:account_id, :platform, :platform_comment_id, :platform_video_id,
+                :platform_parent_id, :video_title, :video_description, :video_url,
+                :commenter_name, :commenter_profile_url, :comment_text, :comment_date,
+                :like_count, :has_owner_reply)
+        """, {
+            "account_id": data["account_id"],
+            "platform": data["platform"],
+            "platform_comment_id": data["platform_comment_id"],
+            "platform_video_id": data.get("platform_video_id"),
+            "platform_parent_id": data.get("platform_parent_id"),
+            "video_title": data.get("video_title", ""),
+            "video_description": data.get("video_description", ""),
+            "video_url": data.get("video_url", ""),
+            "commenter_name": data.get("commenter_name", ""),
+            "commenter_profile_url": data.get("commenter_profile_url", ""),
+            "comment_text": data["comment_text"],
+            "comment_date": data.get("comment_date"),
+            "like_count": data.get("like_count", 0),
+            "has_owner_reply": data.get("has_owner_reply", 0),
+        })
+        row = conn.execute(
+            "SELECT * FROM comments WHERE account_id = ? AND platform_comment_id = ?",
+            (data["account_id"], data["platform_comment_id"])
+        ).fetchone()
+        return dict(row)
+
+
+def get_comments(account_id: int, reply_status: str = None, platform: str = None,
+                 video_id: str = None, since_date: str = None, sort: str = "newest",
+                 limit: int = 200, offset: int = 0):
+    with get_db() as conn:
+        query = "SELECT * FROM comments WHERE account_id = ?"
+        params = [account_id]
+        if reply_status == "no_reply":
+            query += " AND reply_status = 'none' AND has_owner_reply = 0"
+        elif reply_status == "draft":
+            query += " AND reply_status IN ('draft', 'edited')"
+        elif reply_status == "sent":
+            query += " AND reply_status = 'sent'"
+        elif reply_status == "failed":
+            query += " AND reply_status = 'failed'"
+        if platform:
+            query += " AND platform = ?"
+            params.append(platform)
+        if video_id:
+            query += " AND platform_video_id = ?"
+            params.append(video_id)
+        if since_date:
+            query += " AND comment_date >= ?"
+            params.append(since_date)
+        if sort == "oldest":
+            query += " ORDER BY comment_date ASC"
+        else:
+            query += " ORDER BY comment_date DESC"
+        query += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def get_comment(comment_id: int):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_comment(comment_id: int, data: dict):
+    allowed = {"reply_text", "reply_status", "reply_sent_at", "reply_platform_id",
+               "reply_error", "ai_generated", "has_owner_reply"}
+    fields = {k: v for k, v in data.items() if k in allowed}
+    if not fields:
+        return get_comment(comment_id)
+    fields["updated_at"] = "datetime('now')"
+    set_clauses = []
+    params = []
+    for k, v in fields.items():
+        if v == "datetime('now')":
+            set_clauses.append(f"{k} = datetime('now')")
+        else:
+            set_clauses.append(f"{k} = ?")
+            params.append(v)
+    params.append(comment_id)
+    with get_db() as conn:
+        conn.execute(f"UPDATE comments SET {', '.join(set_clauses)} WHERE id = ?", params)
+        return get_comment(comment_id)
+
+
+def get_comment_stats(account_id: int):
+    with get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM comments WHERE account_id = ?", (account_id,)).fetchone()[0]
+        no_reply = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE account_id = ? AND reply_status = 'none' AND has_owner_reply = 0",
+            (account_id,)
+        ).fetchone()[0]
+        drafts = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE account_id = ? AND reply_status IN ('draft', 'edited')",
+            (account_id,)
+        ).fetchone()[0]
+        sent = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE account_id = ? AND reply_status = 'sent'",
+            (account_id,)
+        ).fetchone()[0]
+        failed = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE account_id = ? AND reply_status = 'failed'",
+            (account_id,)
+        ).fetchone()[0]
+        return {"total": total, "no_reply": no_reply, "drafts": drafts, "sent": sent, "failed": failed}
+
+
+# ── AI Settings ────────────────────────────────────────────────────
+
+def get_ai_settings():
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM ai_settings WHERE active = 1 ORDER BY updated_at DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+
+def upsert_ai_settings(data: dict):
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO ai_settings (provider, api_key, model_name, active, updated_at)
+            VALUES (:provider, :api_key, :model_name, 1, datetime('now'))
+            ON CONFLICT(provider) DO UPDATE SET
+                api_key = excluded.api_key,
+                model_name = excluded.model_name,
+                active = 1,
+                updated_at = datetime('now')
+        """, data)
+        # Deactivate other providers
+        conn.execute("UPDATE ai_settings SET active = 0 WHERE provider != ?", (data["provider"],))
+        return get_ai_settings()
+
+
+def get_comment_tone(account_id: int):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM comment_tones WHERE account_id = ?", (account_id,)).fetchone()
+        return dict(row) if row else {"tone_preset": "friendly", "custom_tone": ""}
+
+
+def upsert_comment_tone(account_id: int, data: dict):
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO comment_tones (account_id, tone_preset, custom_tone, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(account_id) DO UPDATE SET
+                tone_preset = excluded.tone_preset,
+                custom_tone = excluded.custom_tone,
+                updated_at = datetime('now')
+        """, (account_id, data.get("tone_preset", "friendly"), data.get("custom_tone", "")))
+        return get_comment_tone(account_id)

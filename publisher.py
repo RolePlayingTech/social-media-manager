@@ -220,9 +220,11 @@ def publish_to_facebook(access_token: str, page_id: str, video_path: str, descri
             page_token = resp.json().get("access_token", access_token)
 
         # Write curl config to temp file (keeps token and description out of ps aux)
+        # Escape newlines and double quotes so they don't break curl -K format
+        safe_desc = (description or "").replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "\\n")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".curl", delete=False) as cf:
             cf.write(f'-F "access_token={page_token}"\n')
-            cf.write(f'-F "description={description}"\n')
+            cf.write(f'-F "description={safe_desc}"\n')
             cf.write(f'-F "source=@{video_path};type=video/mp4"\n')
             config_path = cf.name
 
@@ -534,3 +536,231 @@ def publish_video(account: dict, video: dict, video_path: str) -> dict:
         results["youtube"] = yt_result
 
     return results
+
+
+# ── Comment Fetching ────────────────────────────────────────────────
+
+def fetch_yt_comments(client_id: str, client_secret: str, refresh_token: str,
+                      channel_id: str) -> list[dict]:
+    """Fetch all comment threads for a YouTube channel's videos."""
+    access_token = _get_yt_access_token(client_id, client_secret, refresh_token)
+    if not access_token:
+        raise RuntimeError("YouTube token refresh failed")
+
+    comments = []
+    # Cache video metadata to avoid redundant API calls
+    video_cache = {}
+
+    with httpx.Client(timeout=60) as client:
+        page_token = None
+        while True:
+            params = {
+                "part": "snippet",
+                "allThreadsRelatedToChannelId": channel_id,
+                "maxResults": 100,
+                "order": "time",
+                "textFormat": "plainText",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+
+            resp = client.get("https://www.googleapis.com/youtube/v3/commentThreads",
+                              params=params, headers={"Authorization": f"Bearer {access_token}"})
+            data = resp.json()
+
+            if "error" in data:
+                logger.error(f"YT commentThreads error: {data['error']}")
+                break
+
+            for item in data.get("items", []):
+                snippet = item["snippet"]["topLevelComment"]["snippet"]
+                vid_id = snippet.get("videoId", "")
+
+                # Fetch video metadata (cached)
+                if vid_id and vid_id not in video_cache:
+                    vresp = client.get("https://www.googleapis.com/youtube/v3/videos",
+                                       params={"part": "snippet", "id": vid_id},
+                                       headers={"Authorization": f"Bearer {access_token}"})
+                    vdata = vresp.json()
+                    if vdata.get("items"):
+                        vs = vdata["items"][0]["snippet"]
+                        video_cache[vid_id] = {
+                            "title": vs.get("title", ""),
+                            "description": vs.get("description", ""),
+                        }
+                    else:
+                        video_cache[vid_id] = {"title": "", "description": ""}
+
+                vmeta = video_cache.get(vid_id, {"title": "", "description": ""})
+                has_reply = item["snippet"].get("totalReplyCount", 0) > 0
+
+                comments.append({
+                    "platform": "youtube",
+                    "platform_comment_id": item["snippet"]["topLevelComment"]["id"],
+                    "platform_video_id": vid_id,
+                    "platform_parent_id": item["id"],
+                    "video_title": vmeta["title"],
+                    "video_description": vmeta["description"],
+                    "video_url": f"https://www.youtube.com/watch?v={vid_id}" if vid_id else "",
+                    "commenter_name": snippet.get("authorDisplayName", ""),
+                    "commenter_profile_url": snippet.get("authorChannelUrl", ""),
+                    "comment_text": snippet.get("textDisplay", ""),
+                    "comment_date": snippet.get("publishedAt", ""),
+                    "like_count": snippet.get("likeCount", 0),
+                    "has_owner_reply": has_reply,
+                })
+
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+
+    logger.info(f"Fetched {len(comments)} YouTube comments")
+    return comments
+
+
+def fetch_ig_comments(access_token: str, ig_user_id: str) -> list[dict]:
+    """Fetch comments on all Instagram media for the user."""
+    comments = []
+    with httpx.Client(timeout=60) as client:
+        # Get user's media
+        media_resp = client.get(f"{GRAPH_API_BASE}/{ig_user_id}/media", params={
+            "access_token": access_token,
+            "fields": "id,caption,permalink,media_url,media_type,timestamp",
+            "limit": 50,
+        })
+        media_data = media_resp.json()
+
+        for media in media_data.get("data", []):
+            media_id = media["id"]
+            # Fetch comments for this media
+            c_resp = client.get(f"{GRAPH_API_BASE}/{media_id}/comments", params={
+                "access_token": access_token,
+                "fields": "id,text,timestamp,username,like_count,replies{id,text,timestamp,username}",
+                "limit": 100,
+            })
+            c_data = c_resp.json()
+
+            for c in c_data.get("data", []):
+                # Check if any reply is from the account owner
+                has_reply = False
+                if "replies" in c:
+                    for r in c["replies"].get("data", []):
+                        pass  # IG API doesn't easily tell which is owner reply
+                    has_reply = len(c["replies"].get("data", [])) > 0
+
+                comments.append({
+                    "platform": "instagram",
+                    "platform_comment_id": c["id"],
+                    "platform_video_id": media_id,
+                    "platform_parent_id": media_id,
+                    "video_title": (media.get("caption") or "")[:100],
+                    "video_description": media.get("caption") or "",
+                    "video_url": media.get("permalink") or "",
+                    "commenter_name": c.get("username", ""),
+                    "commenter_profile_url": f"https://instagram.com/{c.get('username', '')}",
+                    "comment_text": c.get("text", ""),
+                    "comment_date": c.get("timestamp", ""),
+                    "like_count": c.get("like_count", 0),
+                    "has_owner_reply": has_reply,
+                })
+
+    logger.info(f"Fetched {len(comments)} Instagram comments")
+    return comments
+
+
+def fetch_fb_comments(access_token: str, page_id: str) -> list[dict]:
+    """Fetch comments on all Facebook Page videos."""
+    comments = []
+    with httpx.Client(timeout=60) as client:
+        # Get page access token
+        pt_resp = client.get(f"{GRAPH_API_BASE}/{page_id}", params={
+            "access_token": access_token, "fields": "access_token",
+        })
+        page_token = pt_resp.json().get("access_token", access_token)
+
+        # Get page videos
+        v_resp = client.get(f"{GRAPH_API_BASE}/{page_id}/videos", params={
+            "access_token": page_token, "fields": "id,title,description,permalink_url", "limit": 50,
+        })
+
+        for video in v_resp.json().get("data", []):
+            vid_id = video["id"]
+            c_resp = client.get(f"{GRAPH_API_BASE}/{vid_id}/comments", params={
+                "access_token": page_token,
+                "fields": "id,message,created_time,from,like_count,comment_count",
+                "limit": 100,
+            })
+
+            for c in c_resp.json().get("data", []):
+                commenter = c.get("from", {})
+                comments.append({
+                    "platform": "facebook",
+                    "platform_comment_id": c["id"],
+                    "platform_video_id": vid_id,
+                    "platform_parent_id": vid_id,
+                    "video_title": video.get("title") or video.get("description", "")[:100],
+                    "video_description": video.get("description") or "",
+                    "video_url": video.get("permalink_url") or f"https://www.facebook.com/{vid_id}",
+                    "commenter_name": commenter.get("name", ""),
+                    "commenter_profile_url": "",
+                    "comment_text": c.get("message", ""),
+                    "comment_date": c.get("created_time", ""),
+                    "like_count": c.get("like_count", 0),
+                    "has_owner_reply": (c.get("comment_count", 0) > 0),
+                })
+
+    logger.info(f"Fetched {len(comments)} Facebook comments")
+    return comments
+
+
+# ── Comment Reply Sending ──────────────────────────────────────────
+
+def send_yt_reply(client_id: str, client_secret: str, refresh_token: str,
+                  parent_comment_id: str, text: str) -> dict:
+    """Post a reply to a YouTube comment."""
+    access_token = _get_yt_access_token(client_id, client_secret, refresh_token)
+    if not access_token:
+        return {"success": False, "error": "Token refresh failed"}
+
+    with httpx.Client(timeout=30) as client:
+        resp = client.post("https://www.googleapis.com/youtube/v3/comments",
+                           params={"part": "snippet"},
+                           headers={"Authorization": f"Bearer {access_token}",
+                                    "Content-Type": "application/json"},
+                           json={"snippet": {"parentId": parent_comment_id, "textOriginal": text}})
+        data = resp.json()
+        if "error" in data:
+            return {"success": False, "error": data["error"].get("message", str(data["error"]))}
+        return {"success": True, "reply_id": data.get("id")}
+
+
+def send_ig_reply(access_token: str, media_id: str, comment_id: str, text: str) -> dict:
+    """Reply to an Instagram comment."""
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(f"{GRAPH_API_BASE}/{comment_id}/replies", params={
+            "access_token": access_token,
+            "message": text,
+        })
+        data = resp.json()
+        if "error" in data:
+            return {"success": False, "error": data["error"].get("message", str(data["error"]))}
+        return {"success": True, "reply_id": data.get("id")}
+
+
+def send_fb_reply(access_token: str, page_id: str, comment_id: str, text: str) -> dict:
+    """Reply to a Facebook comment."""
+    with httpx.Client(timeout=30) as client:
+        # Get page token
+        pt_resp = client.get(f"{GRAPH_API_BASE}/{page_id}", params={
+            "access_token": access_token, "fields": "access_token",
+        })
+        page_token = pt_resp.json().get("access_token", access_token)
+
+        resp = client.post(f"{GRAPH_API_BASE}/{comment_id}/comments", params={
+            "access_token": page_token,
+            "message": text,
+        })
+        data = resp.json()
+        if "error" in data:
+            return {"success": False, "error": data["error"].get("message", str(data["error"]))}
+        return {"success": True, "reply_id": data.get("id")}

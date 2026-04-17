@@ -40,6 +40,7 @@ from zoneinfo import ZoneInfo
 import database as db
 import publisher
 import scheduler as sched
+import ai_client
 
 # ── Logging ──────────────────────────────────────────────────────────
 
@@ -67,8 +68,9 @@ MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
 CORS_ORIGINS = os.environ.get("SMM_CORS_ORIGINS", "http://localhost:3000").split(",")
 TIMEZONE = os.environ.get("SMM_TIMEZONE", "Europe/Warsaw")
 
-# Track publish jobs in-memory
+# Track background jobs in-memory
 publish_jobs: dict = {}
+background_jobs: dict = {}  # For comment fetching, AI generation
 
 # ── Lifespan ─────────────────────────────────────────────────────────
 
@@ -193,6 +195,31 @@ class VideoUpdate(BaseModel):
 
 class ReorderRequest(BaseModel):
     video_ids: list[int]
+
+class VideoCopyRequest(BaseModel):
+    target_account_id: int
+
+class AISettingsUpdate(BaseModel):
+    provider: str
+    api_key: str
+    model_name: str
+
+class CommentToneUpdate(BaseModel):
+    tone_preset: str = "friendly"
+    custom_tone: str = ""
+
+class CommentReplyUpdate(BaseModel):
+    reply_text: str
+
+class AIGenerateRequest(BaseModel):
+    comment_ids: list[int] = []
+
+class BulkSendRequest(BaseModel):
+    comment_ids: list[int] = []
+
+class CommentImportItem(BaseModel):
+    platform_comment_id: str
+    reply_text: str
 
 
 # ── Account Endpoints ───────────────────────────────────────────────
@@ -717,6 +744,83 @@ async def archive_video(video_id: int):
     return {"ok": True}
 
 
+@app.post("/api/videos/{video_id}/copy", dependencies=[Depends(verify_token)])
+async def copy_video(video_id: int, req: VideoCopyRequest):
+    """Copy a queued video to another account's queue."""
+    video = db.get_video(video_id)
+    if not video:
+        raise HTTPException(404, "Video not found")
+    if video["status"] != "queued":
+        raise HTTPException(400, "Only queued videos can be copied")
+
+    src_account = db.get_account(video["account_id"])
+    dst_account = db.get_account(req.target_account_id)
+    if not dst_account:
+        raise HTTPException(404, "Target account not found")
+    if video["account_id"] == req.target_account_id:
+        raise HTTPException(400, "Cannot copy to the same account")
+
+    # Auto-convert video type based on account types
+    vtype = video["video_type"]
+    if src_account["type"] != dst_account["type"]:
+        if dst_account["type"] == "youtube":
+            vtype = "short" if vtype in ("reel", "story") else vtype
+        else:
+            vtype = "reel" if vtype in ("short", "video") else vtype
+
+    # Handle filename deduplication in target queue dir
+    src_dir = os.path.join(UPLOAD_DIR, str(video["account_id"]), "queue")
+    dst_dir = os.path.join(UPLOAD_DIR, str(req.target_account_id), "queue")
+    os.makedirs(dst_dir, exist_ok=True)
+
+    base_name, ext = os.path.splitext(video["filename"])
+    dst_filename = video["filename"]
+    counter = 1
+    while os.path.exists(os.path.join(dst_dir, dst_filename)):
+        dst_filename = f"{base_name}_{counter}{ext}"
+        counter += 1
+
+    # Hard-link video file (saves disk space), fallback to copy
+    src_path = os.path.join(src_dir, video["filename"])
+    dst_path = os.path.join(dst_dir, dst_filename)
+    if not os.path.exists(src_path):
+        raise HTTPException(400, "Source video file not found on disk")
+    try:
+        os.link(src_path, dst_path)
+    except OSError:
+        shutil.copy2(src_path, dst_path)
+
+    # Copy caption and subtitle files (regular copy — users may edit independently)
+    dst_base = os.path.join(dst_dir, os.path.splitext(dst_filename)[0])
+    src_base = os.path.join(src_dir, os.path.splitext(video["filename"])[0])
+    subtitle_file = None
+    for file_ext in (".txt", ".srt"):
+        if os.path.exists(src_base + file_ext):
+            shutil.copy2(src_base + file_ext, dst_base + file_ext)
+            if file_ext == ".srt":
+                subtitle_file = os.path.splitext(dst_filename)[0] + ".srt"
+
+    new_video = db.add_video({
+        "account_id": req.target_account_id,
+        "filename": dst_filename,
+        "original_filename": video.get("original_filename", video["filename"]),
+        "title": video.get("title", ""),
+        "caption": video.get("caption", ""),
+        "video_type": vtype,
+        "file_size": video.get("file_size"),
+        "yt_title": video.get("yt_title"),
+        "yt_description": video.get("yt_description"),
+        "yt_tags": video.get("yt_tags"),
+        "yt_category": video.get("yt_category", "22"),
+        "yt_privacy": video.get("yt_privacy", "public"),
+        "subtitle_file": subtitle_file or video.get("subtitle_file"),
+        "target_ig": video.get("target_ig", 1),
+        "target_fb": video.get("target_fb", 1),
+        "fb_title": video.get("fb_title"),
+    })
+    return {"ok": True, "video": new_video}
+
+
 @app.post("/api/videos/{video_id}/retry", dependencies=[Depends(verify_token)])
 async def retry_video(video_id: int):
     """Retry a failed video - move it back to queue."""
@@ -726,7 +830,7 @@ async def retry_video(video_id: int):
     if video["status"] != "failed":
         raise HTTPException(400, "Video is not in failed status")
 
-    db.update_video(video_id, {"status": "queued", "error_message": None})
+    db.update_video(video_id, {"status": "queued", "error_message": None, "published_at": None})
     return {"ok": True}
 
 
@@ -1152,6 +1256,386 @@ async def serve_video(account_id: int, subdir: str, filename: str, request: Requ
         raise HTTPException(404, "File not found")
 
     return FileResponse(real_path, media_type="video/mp4")
+
+
+# ── Comments Endpoints ──────────────────────────────────────────────
+
+@app.get("/api/accounts/{account_id}/comments", dependencies=[Depends(verify_token)])
+async def list_comments(account_id: int, filter: str = "all", platform: str = None,
+                        video_id: str = None, sort: str = "newest",
+                        limit: int = 200, offset: int = 0):
+    from datetime import datetime as _dt
+    since = None
+    reply_status = None
+    if filter == "no_reply":
+        reply_status = "no_reply"
+    elif filter == "week_no_reply":
+        reply_status = "no_reply"
+        since = (_dt.now() - timedelta(days=7)).isoformat()
+    elif filter == "oldest_no_reply":
+        reply_status = "no_reply"
+        sort = "oldest"
+    elif filter == "draft":
+        reply_status = "draft"
+    elif filter == "sent":
+        reply_status = "sent"
+    elif filter == "failed":
+        reply_status = "failed"
+    return db.get_comments(account_id, reply_status=reply_status, platform=platform,
+                           video_id=video_id, since_date=since, sort=sort,
+                           limit=limit, offset=offset)
+
+
+@app.get("/api/accounts/{account_id}/comments/stats", dependencies=[Depends(verify_token)])
+async def comment_stats(account_id: int):
+    return db.get_comment_stats(account_id)
+
+
+@app.get("/api/comments/{comment_id}", dependencies=[Depends(verify_token)])
+async def get_comment(comment_id: int):
+    c = db.get_comment(comment_id)
+    if not c:
+        raise HTTPException(404, "Comment not found")
+    return c
+
+
+@app.put("/api/comments/{comment_id}", dependencies=[Depends(verify_token)])
+async def update_comment_reply(comment_id: int, req: CommentReplyUpdate):
+    c = db.get_comment(comment_id)
+    if not c:
+        raise HTTPException(404, "Comment not found")
+    status = "edited" if c["reply_status"] in ("draft", "edited", "failed") else "draft"
+    return db.update_comment(comment_id, {"reply_text": req.reply_text, "reply_status": status})
+
+
+@app.post("/api/accounts/{account_id}/comments/fetch", dependencies=[Depends(verify_token)])
+async def fetch_comments(account_id: int):
+    """Fetch comments from platform API (runs in background)."""
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    job_id = str(uuid.uuid4())
+    background_jobs[job_id] = {"type": "fetch", "status": "started", "progress": "", "result": None}
+
+    def run_fetch():
+        try:
+            background_jobs[job_id]["status"] = "running"
+            comments = []
+            if account["type"] == "youtube":
+                if not account.get("yt_refresh_token") or not account.get("yt_channel_id"):
+                    background_jobs[job_id] = {"type": "fetch", "status": "failed",
+                                                "progress": "YouTube not configured", "result": None}
+                    return
+                background_jobs[job_id]["progress"] = "Pobieranie komentarzy z YouTube..."
+                comments = publisher.fetch_yt_comments(
+                    account["yt_client_id"], account["yt_client_secret"],
+                    account["yt_refresh_token"], account["yt_channel_id"])
+            elif account["type"] == "instagram_facebook":
+                if account.get("ig_user_id") and account.get("fb_access_token"):
+                    background_jobs[job_id]["progress"] = "Pobieranie komentarzy z Instagram..."
+                    comments.extend(publisher.fetch_ig_comments(
+                        account["fb_access_token"], account["ig_user_id"]))
+                if account.get("fb_page_id") and account.get("fb_access_token"):
+                    background_jobs[job_id]["progress"] = "Pobieranie komentarzy z Facebook..."
+                    comments.extend(publisher.fetch_fb_comments(
+                        account["fb_access_token"], account["fb_page_id"]))
+
+            # Store in DB (dedup via upsert)
+            new_count = 0
+            for c in comments:
+                c["account_id"] = account_id
+                result = db.upsert_comment(c)
+                if result.get("fetched_at") and result["fetched_at"] >= datetime.now().strftime("%Y-%m-%d"):
+                    new_count += 1
+
+            background_jobs[job_id] = {
+                "type": "fetch", "status": "done",
+                "progress": f"Gotowe: {len(comments)} komentarzy ({new_count} nowych)",
+                "result": {"total": len(comments), "new": new_count},
+            }
+        except Exception as e:
+            logger.error(f"Comment fetch error: {e}")
+            background_jobs[job_id] = {"type": "fetch", "status": "failed",
+                                        "progress": f"Błąd: {e}", "result": None}
+
+    threading.Thread(target=run_fetch, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/jobs/{job_id}", dependencies=[Depends(verify_token)])
+async def job_status(job_id: str):
+    if job_id not in background_jobs:
+        raise HTTPException(404, "Job not found")
+    return background_jobs[job_id]
+
+
+# ── Comment Reply Sending ──────────────────────────────────────────
+
+@app.post("/api/comments/{comment_id}/send", dependencies=[Depends(verify_token)])
+async def send_comment_reply(comment_id: int):
+    c = db.get_comment(comment_id)
+    if not c:
+        raise HTTPException(404, "Comment not found")
+    if not c.get("reply_text"):
+        raise HTTPException(400, "No reply text")
+    if c["reply_status"] == "sent":
+        raise HTTPException(400, "Already sent")
+
+    account = db.get_account(c["account_id"])
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    db.update_comment(comment_id, {"reply_status": "sending"})
+
+    try:
+        if c["platform"] == "youtube":
+            result = publisher.send_yt_reply(
+                account["yt_client_id"], account["yt_client_secret"],
+                account["yt_refresh_token"], c["platform_comment_id"], c["reply_text"])
+        elif c["platform"] == "instagram":
+            result = publisher.send_ig_reply(
+                account["fb_access_token"], c["platform_video_id"],
+                c["platform_comment_id"], c["reply_text"])
+        elif c["platform"] == "facebook":
+            result = publisher.send_fb_reply(
+                account["fb_access_token"], account["fb_page_id"],
+                c["platform_comment_id"], c["reply_text"])
+        else:
+            result = {"success": False, "error": "Unknown platform"}
+
+        if result.get("success"):
+            db.update_comment(comment_id, {
+                "reply_status": "sent",
+                "reply_sent_at": datetime.now().isoformat(),
+                "reply_platform_id": result.get("reply_id"),
+                "has_owner_reply": 1,
+            })
+            return {"ok": True, "reply_id": result.get("reply_id")}
+        else:
+            db.update_comment(comment_id, {
+                "reply_status": "failed",
+                "reply_error": result.get("error", "Unknown error"),
+            })
+            raise HTTPException(500, result.get("error", "Send failed"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.update_comment(comment_id, {"reply_status": "failed", "reply_error": str(e)})
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/accounts/{account_id}/comments/send-all", dependencies=[Depends(verify_token)])
+async def send_all_replies(account_id: int, req: BulkSendRequest):
+    """Send all pending replies (draft/edited) in background."""
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    if req.comment_ids:
+        pending = [db.get_comment(cid) for cid in req.comment_ids]
+        pending = [c for c in pending if c and c["reply_text"]]
+    else:
+        pending = db.get_comments(account_id, reply_status="draft")
+
+    job_id = str(uuid.uuid4())
+    background_jobs[job_id] = {"type": "send", "status": "running", "progress": "0/0", "result": None}
+
+    def run_send():
+        sent = 0
+        failed = 0
+        for i, c in enumerate(pending):
+            background_jobs[job_id]["progress"] = f"{i+1}/{len(pending)}"
+            try:
+                db.update_comment(c["id"], {"reply_status": "sending"})
+                if c["platform"] == "youtube":
+                    result = publisher.send_yt_reply(
+                        account["yt_client_id"], account["yt_client_secret"],
+                        account["yt_refresh_token"], c["platform_comment_id"], c["reply_text"])
+                elif c["platform"] == "instagram":
+                    result = publisher.send_ig_reply(
+                        account["fb_access_token"], c["platform_video_id"],
+                        c["platform_comment_id"], c["reply_text"])
+                elif c["platform"] == "facebook":
+                    result = publisher.send_fb_reply(
+                        account["fb_access_token"], account["fb_page_id"],
+                        c["platform_comment_id"], c["reply_text"])
+                else:
+                    result = {"success": False, "error": "Unknown platform"}
+
+                if result.get("success"):
+                    db.update_comment(c["id"], {
+                        "reply_status": "sent", "reply_sent_at": datetime.now().isoformat(),
+                        "reply_platform_id": result.get("reply_id"), "has_owner_reply": 1,
+                    })
+                    sent += 1
+                else:
+                    db.update_comment(c["id"], {"reply_status": "failed", "reply_error": result.get("error")})
+                    failed += 1
+            except Exception as e:
+                db.update_comment(c["id"], {"reply_status": "failed", "reply_error": str(e)})
+                failed += 1
+            time.sleep(1)  # Rate limit protection
+
+        background_jobs[job_id] = {
+            "type": "send", "status": "done",
+            "progress": f"Wysłano {sent}, błędów {failed}",
+            "result": {"sent": sent, "failed": failed},
+        }
+
+    threading.Thread(target=run_send, daemon=True).start()
+    return {"job_id": job_id, "pending": len(pending)}
+
+
+# ── AI Settings & Generation ──────────────────────────────────────
+
+@app.get("/api/ai-settings", dependencies=[Depends(verify_token)])
+async def get_ai_settings():
+    settings = db.get_ai_settings()
+    if settings:
+        settings["api_key"] = "***configured***"
+    return settings or {}
+
+
+@app.put("/api/ai-settings", dependencies=[Depends(verify_token)])
+async def update_ai_settings(req: AISettingsUpdate):
+    if req.provider not in ("anthropic", "openai", "google"):
+        raise HTTPException(400, "Invalid provider")
+    result = db.upsert_ai_settings({
+        "provider": req.provider, "api_key": req.api_key, "model_name": req.model_name,
+    })
+    result["api_key"] = "***configured***"
+    return result
+
+
+@app.get("/api/ai-models")
+async def list_ai_models():
+    return ai_client.MODELS
+
+
+@app.get("/api/ai-tones")
+async def list_ai_tones():
+    return {k: v for k, v in ai_client.TONE_PRESETS.items()}
+
+
+@app.get("/api/accounts/{account_id}/comment-tone", dependencies=[Depends(verify_token)])
+async def get_tone(account_id: int):
+    return db.get_comment_tone(account_id)
+
+
+@app.put("/api/accounts/{account_id}/comment-tone", dependencies=[Depends(verify_token)])
+async def update_tone(account_id: int, req: CommentToneUpdate):
+    return db.upsert_comment_tone(account_id, {"tone_preset": req.tone_preset, "custom_tone": req.custom_tone})
+
+
+@app.post("/api/accounts/{account_id}/comments/generate-replies", dependencies=[Depends(verify_token)])
+async def generate_replies(account_id: int, req: AIGenerateRequest):
+    """Generate AI replies for comments (runs in background)."""
+    settings = db.get_ai_settings()
+    if not settings:
+        raise HTTPException(400, "AI not configured - set API key first")
+
+    tone_data = db.get_comment_tone(account_id)
+    tone = ai_client.get_tone_instructions(tone_data["tone_preset"], tone_data.get("custom_tone", ""))
+
+    if req.comment_ids:
+        targets = [db.get_comment(cid) for cid in req.comment_ids]
+        targets = [c for c in targets if c and c["account_id"] == account_id]
+    else:
+        targets = db.get_comments(account_id, reply_status="no_reply", limit=50)
+
+    if not targets:
+        raise HTTPException(400, "No comments to process")
+
+    job_id = str(uuid.uuid4())
+    background_jobs[job_id] = {"type": "generate", "status": "running",
+                                "progress": f"0/{len(targets)}", "result": None}
+
+    def run_generate():
+        generated = 0
+        errors = 0
+        for i, c in enumerate(targets):
+            background_jobs[job_id]["progress"] = f"{i+1}/{len(targets)}"
+            try:
+                reply = ai_client.generate_reply(
+                    settings["provider"], settings["api_key"], settings["model_name"],
+                    c.get("video_title", ""), c.get("video_description", ""),
+                    c["comment_text"], c.get("commenter_name", ""), tone)
+                db.update_comment(c["id"], {
+                    "reply_text": reply, "reply_status": "draft", "ai_generated": 1,
+                })
+                generated += 1
+            except Exception as e:
+                logger.error(f"AI generation error for comment {c['id']}: {e}")
+                errors += 1
+            time.sleep(0.5)  # Rate limit
+
+        background_jobs[job_id] = {
+            "type": "generate", "status": "done",
+            "progress": f"Wygenerowano {generated}, błędów {errors}",
+            "result": {"generated": generated, "errors": errors},
+        }
+
+    threading.Thread(target=run_generate, daemon=True).start()
+    return {"job_id": job_id, "target_count": len(targets)}
+
+
+# ── Comment Export/Import ──────────────────────────────────────────
+
+@app.get("/api/accounts/{account_id}/comments/export", dependencies=[Depends(verify_token)])
+async def export_comments(account_id: int, filter: str = "all"):
+    from datetime import datetime as _dt
+    comments = db.get_comments(account_id, reply_status="no_reply" if filter == "no_reply" else None, limit=10000)
+    export = {
+        "account_id": account_id,
+        "exported_at": _dt.now().isoformat(),
+        "count": len(comments),
+        "comments": [{
+            "platform_comment_id": c["platform_comment_id"],
+            "platform": c["platform"],
+            "video_title": c["video_title"],
+            "video_url": c["video_url"],
+            "commenter_name": c["commenter_name"],
+            "comment_text": c["comment_text"],
+            "comment_date": c["comment_date"],
+            "reply_text": c.get("reply_text") or "",
+        } for c in comments],
+    }
+    return JSONResponse(content=export, headers={
+        "Content-Disposition": f"attachment; filename=comments_{account_id}_{_dt.now().strftime('%Y%m%d')}.json"
+    })
+
+
+@app.post("/api/accounts/{account_id}/comments/import", dependencies=[Depends(verify_token)])
+async def import_comments(account_id: int, request: Request):
+    """Import replies from JSON file."""
+    body = await request.json()
+    items = body.get("comments", [])
+    updated = 0
+    skipped = 0
+    for item in items:
+        reply = item.get("reply_text", "").strip()
+        if not reply:
+            skipped += 1
+            continue
+        cid = item.get("platform_comment_id")
+        if not cid:
+            skipped += 1
+            continue
+        # Find comment in DB
+        comments = db.get_comments(account_id, limit=1)
+        from database import get_db
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT id FROM comments WHERE account_id = ? AND platform_comment_id = ?",
+                (account_id, cid)
+            ).fetchone()
+            if row:
+                db.update_comment(row[0], {"reply_text": reply, "reply_status": "edited"})
+                updated += 1
+            else:
+                skipped += 1
+    return {"ok": True, "updated": updated, "skipped": skipped}
 
 
 # ── Static Files (Dashboard) ────────────────────────────────────────

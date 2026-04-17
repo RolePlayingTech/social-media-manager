@@ -184,11 +184,11 @@ async function selectAccount(id) {
     if (!acc) return;
 
     const isYT = acc.type === 'youtube';
-    renderAccountView(acc, isYT);
+    await renderAccountView(acc, isYT);
     switchTab(currentTab);
 }
 
-function renderAccountView(acc, isYT) {
+async function renderAccountView(acc, isYT) {
     const statsRow = isYT
         ? `<div class="account-stat"><span class="account-stat-value">${fmtNum(acc.yt_subscribers)}</span><span class="account-stat-label">Sub</span></div>
            <div class="account-stat"><span class="account-stat-value">${fmtNum(acc.yt_video_count)}</span><span class="account-stat-label">Film\u00f3w</span></div>`
@@ -206,15 +206,22 @@ function renderAccountView(acc, isYT) {
 
     const stats = acc.stats || {};
 
+    // Fetch comment stats for badge
+    let cStats = {};
+    try { cStats = await api('GET', `/accounts/${acc.id}/comments/stats`); } catch(e) {}
+    const cBadge = cStats.no_reply ? `<span class="tab-badge">${cStats.no_reply}</span>` : '';
+
     const tabsHtml = isYT
         ? `<div class="tab active" data-tab="queue" onclick="switchTab('queue')">Kolejka<span class="tab-badge">${stats.queued || 0}</span></div>
            <div class="tab" data-tab="published" onclick="switchTab('published')">Opublikowane<span class="tab-badge">${stats.published || 0}</span></div>
+           <div class="tab" data-tab="comments" onclick="switchTab('comments')">Komentarze${cBadge}</div>
            <div class="tab" data-tab="upload" onclick="switchTab('upload')">Upload</div>
            <div class="tab" data-tab="schedule" onclick="switchTab('schedule')">Harmonogram</div>
            <div class="tab" data-tab="logs" onclick="switchTab('logs')">Logi</div>
            <div class="tab" data-tab="settings" onclick="switchTab('settings')">Ustawienia</div>`
         : `<div class="tab active" data-tab="queue" onclick="switchTab('queue')">Kolejka<span class="tab-badge">${stats.queued || 0}</span></div>
            <div class="tab" data-tab="published" onclick="switchTab('published')">Opublikowane<span class="tab-badge">${stats.published || 0}</span></div>
+           <div class="tab" data-tab="comments" onclick="switchTab('comments')">Komentarze${cBadge}</div>
            <div class="tab" data-tab="stories" onclick="switchTab('stories')">Relacje</div>
            <div class="tab" data-tab="upload" onclick="switchTab('upload')">Upload</div>
            <div class="tab" data-tab="schedule" onclick="switchTab('schedule')">Harmonogram</div>
@@ -259,6 +266,7 @@ async function switchTab(tab) {
         case 'queue': await renderQueue(area); break;
         case 'published': await renderPublished(area); break;
         case 'stories': await renderStories(area); break;
+        case 'comments': await renderComments(area); break;
         case 'upload': renderUpload(area); break;
         case 'schedule': await renderSchedule(area); break;
         case 'logs': await renderLogs(area); break;
@@ -335,6 +343,7 @@ async function renderQueue(container) {
                     <button class="btn btn-success btn-sm" onclick="publishNow(${v.id})">Publikuj</button>
                     <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'up', ${currentAccountId})" ${i === 0 ? 'disabled' : ''}>\u2191</button>
                     <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'down', ${currentAccountId})" ${i === videos.length - 1 ? 'disabled' : ''}>\u2193</button>
+                    <button class="btn btn-sm" onclick="showCopyDropdown(event, ${v.id})" title="Kopiuj do innego konta">\u29C9</button>
                     <button class="btn btn-danger btn-sm" onclick="confirmDeleteVideo(${v.id})">\u2717</button>
                 </div>
             </div>`;
@@ -1182,6 +1191,350 @@ async function moveVideoToPos(videoId, newPosStr, total) {
     } catch (e) {
         toast('Błąd: ' + e.message, 'error');
     }
+}
+
+// ── Copy to Another Account ─────────────────────────────────────────
+
+function showCopyDropdown(event, videoId) {
+    event.stopPropagation();
+    // Remove existing dropdown
+    const old = document.getElementById('copy-dropdown');
+    if (old) old.remove();
+
+    const btn = event.currentTarget;
+    const rect = btn.getBoundingClientRect();
+
+    const dd = document.createElement('div');
+    dd.id = 'copy-dropdown';
+    dd.className = 'copy-dropdown';
+
+    const otherAccounts = accounts.filter(a => a.id !== currentAccountId);
+    if (!otherAccounts.length) {
+        dd.innerHTML = '<div class="copy-dropdown-item" style="color:var(--text-muted)">Brak innych kont</div>';
+    } else {
+        otherAccounts.forEach(a => {
+            const typeTag = a.type === 'youtube' ? 'YT' : 'IG+FB';
+            const item = document.createElement('div');
+            item.className = 'copy-dropdown-item';
+            item.innerHTML = `<span>${esc(a.name)}</span> <span class="copy-type-tag ${a.type === 'youtube' ? 'yt' : 'igfb'}">${typeTag}</span>`;
+            item.onclick = (e) => { e.stopPropagation(); copyVideoToAccount(videoId, a.id); dd.remove(); };
+            dd.appendChild(item);
+        });
+    }
+
+    document.body.appendChild(dd);
+
+    // Position: prefer below the button, flip up if no space
+    const ddH = dd.offsetHeight;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    dd.style.left = Math.min(rect.left, window.innerWidth - dd.offsetWidth - 8) + 'px';
+    if (spaceBelow >= ddH + 4) {
+        dd.style.top = (rect.bottom + 4) + 'px';
+    } else {
+        dd.style.top = (rect.top - ddH - 4) + 'px';
+    }
+
+    // Close on outside click
+    setTimeout(() => document.addEventListener('click', function handler() {
+        dd.remove();
+        document.removeEventListener('click', handler);
+    }, { once: true }), 0);
+}
+
+async function copyVideoToAccount(videoId, targetAccountId) {
+    try {
+        await api('POST', `/videos/${videoId}/copy`, { target_account_id: targetAccountId });
+        toast('Film skopiowany', 'success');
+        await loadAccounts();
+        switchTab('queue');
+    } catch (e) {
+        toast('Błąd: ' + e.message, 'error');
+    }
+}
+
+// ── Comments Tab ────────────────────────────────────────────────────
+
+let commentsFilter = 'all';
+
+async function renderComments(container) {
+    try {
+        const [comments, stats, tone, aiSettings] = await Promise.all([
+            api('GET', `/accounts/${currentAccountId}/comments?filter=${commentsFilter}`),
+            api('GET', `/accounts/${currentAccountId}/comments/stats`),
+            api('GET', `/accounts/${currentAccountId}/comment-tone`),
+            api('GET', '/ai-settings').catch(() => null),
+        ]);
+
+        const filters = [
+            { key: 'all', label: 'Wszystkie', count: stats.total },
+            { key: 'no_reply', label: 'Bez odpowiedzi', count: stats.no_reply },
+            { key: 'week_no_reply', label: 'Tydzień bez odp.', count: null },
+            { key: 'oldest_no_reply', label: 'Najstarsze bez odp.', count: null },
+            { key: 'draft', label: 'Wersje robocze', count: stats.drafts },
+            { key: 'sent', label: 'Wysłane', count: stats.sent },
+            { key: 'failed', label: 'Błędy', count: stats.failed },
+        ];
+
+        let html = `<div class="tab-content active">`;
+
+        // Toolbar
+        html += `<div class="comments-toolbar">
+            <div class="comments-toolbar-row">
+                <button class="btn btn-success" onclick="fetchComments()">Pobierz komentarze</button>
+                <button class="btn" onclick="generateAllReplies()" ${!aiSettings ? 'disabled title="Skonfiguruj AI w ustawieniach"' : ''}>Generuj odpowiedzi AI</button>
+                <button class="btn" onclick="sendAllReplies()" ${stats.drafts === 0 ? 'disabled' : ''}>Wyślij wszystkie (${stats.drafts})</button>
+                <button class="btn btn-sm" onclick="exportComments()">Eksport JSON</button>
+                <label class="btn btn-sm"><input type="file" accept=".json" onchange="importComments(event)" hidden>Import JSON</label>
+                <button class="btn btn-sm" onclick="showAISettingsModal()">Ustawienia AI</button>
+            </div>
+            <div class="comments-filters">
+                ${filters.map(f => `<button class="filter-btn ${commentsFilter === f.key ? 'active' : ''}"
+                    onclick="commentsFilter='${f.key}';renderComments(document.getElementById('tab-content-area'))">
+                    ${f.label}${f.count !== null ? ` (${f.count})` : ''}
+                </button>`).join('')}
+            </div>
+        </div>`;
+
+        if (comments.length === 0) {
+            html += `<p style="color:var(--text-muted);padding:20px">Brak komentarzy${commentsFilter !== 'all' ? ' dla tego filtra' : '. Kliknij "Pobierz komentarze"'}.</p>`;
+        } else {
+            // Group by video
+            const byVideo = {};
+            comments.forEach(c => {
+                const key = c.platform_video_id || 'unknown';
+                if (!byVideo[key]) byVideo[key] = { title: c.video_title, url: c.video_url, desc: c.video_description, platform: c.platform, comments: [] };
+                byVideo[key].comments.push(c);
+            });
+
+            for (const [vid, group] of Object.entries(byVideo)) {
+                const platBadge = group.platform === 'youtube' ? 'yt' : group.platform === 'instagram' ? 'ig' : 'fb';
+                const platLabel = group.platform === 'youtube' ? 'YT' : group.platform === 'instagram' ? 'IG' : 'FB';
+                html += `<div class="comment-group">
+                    <div class="comment-video-header">
+                        <span class="platform-badge ${platBadge}">${platLabel}</span>
+                        <a href="${esc(group.url)}" target="_blank" class="comment-video-title">${esc(group.title || 'Bez tytułu')}</a>
+                        <span class="comment-video-count">${group.comments.length} komentarzy</span>
+                    </div>`;
+
+                group.comments.forEach(c => {
+                    const statusCls = c.reply_status === 'sent' ? 'sent' : c.reply_status === 'failed' ? 'failed' :
+                                      c.reply_status === 'draft' || c.reply_status === 'edited' ? 'draft' : 'none';
+                    const statusLabel = {none: '', draft: 'Wersja robocza', edited: 'Edytowano', sending: 'Wysyłanie...', sent: 'Wysłano', failed: 'Błąd'}[c.reply_status] || '';
+                    const date = c.comment_date ? new Date(c.comment_date).toLocaleDateString('pl-PL', {day:'numeric',month:'short',year:'numeric'}) : '';
+
+                    html += `<div class="comment-card" data-id="${c.id}">
+                        <div class="comment-header">
+                            <strong class="comment-author">${esc(c.commenter_name)}</strong>
+                            <span class="comment-date">${date}</span>
+                            ${c.like_count ? `<span class="comment-likes">${c.like_count}</span>` : ''}
+                            ${c.has_owner_reply && c.reply_status === 'none' ? '<span class="comment-replied-ext">Odpowiedziano</span>' : ''}
+                            ${statusLabel ? `<span class="reply-status-badge ${statusCls}">${statusLabel}</span>` : ''}
+                        </div>
+                        <div class="comment-text">${esc(c.comment_text)}</div>
+                        <div class="comment-reply-area">
+                            <textarea class="comment-reply-input" id="reply-${c.id}" placeholder="Napisz odpowiedź...">${esc(c.reply_text || '')}</textarea>
+                            <div class="comment-reply-actions">
+                                <button class="btn btn-sm" onclick="saveReply(${c.id})">Zapisz</button>
+                                <button class="btn btn-sm" onclick="generateSingleReply(${c.id})" ${!aiSettings ? 'disabled' : ''}>AI</button>
+                                <button class="btn btn-success btn-sm" onclick="sendSingleReply(${c.id})" ${!c.reply_text ? 'disabled' : ''}>Wyślij</button>
+                                ${c.reply_error ? `<span class="reply-error" title="${esc(c.reply_error)}">Błąd</span>` : ''}
+                            </div>
+                        </div>
+                    </div>`;
+                });
+
+                html += `</div>`;
+            }
+        }
+
+        html += `</div>`;
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div class="tab-content active"><p style="color:var(--red)">Błąd: ${e.message}</p></div>`;
+    }
+}
+
+async function fetchComments() {
+    try {
+        toast('Pobieranie komentarzy...', 'info');
+        const { job_id } = await api('POST', `/accounts/${currentAccountId}/comments/fetch`);
+        pollJob(job_id, () => { toast('Komentarze pobrane', 'success'); switchTab('comments'); });
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
+}
+
+function pollJob(jobId, onDone) {
+    const poll = async () => {
+        try {
+            const job = await api('GET', `/jobs/${jobId}`);
+            if (job.status === 'done') { onDone(job); return; }
+            if (job.status === 'failed') { toast(job.progress || 'Błąd', 'error'); return; }
+            setTimeout(poll, 1500);
+        } catch (e) { toast('Błąd pollowania: ' + e.message, 'error'); }
+    };
+    poll();
+}
+
+async function saveReply(commentId) {
+    const text = document.getElementById(`reply-${commentId}`).value.trim();
+    if (!text) return;
+    try {
+        await api('PUT', `/comments/${commentId}`, { reply_text: text });
+        toast('Zapisano', 'success');
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
+}
+
+async function sendSingleReply(commentId) {
+    const text = document.getElementById(`reply-${commentId}`).value.trim();
+    if (text) await saveReply(commentId);
+    try {
+        await api('POST', `/comments/${commentId}/send`);
+        toast('Wysłano', 'success');
+        switchTab('comments');
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
+}
+
+async function generateSingleReply(commentId) {
+    try {
+        toast('Generowanie...', 'info');
+        const { job_id } = await api('POST', `/accounts/${currentAccountId}/comments/generate-replies`, { comment_ids: [commentId] });
+        pollJob(job_id, () => { toast('Wygenerowano', 'success'); switchTab('comments'); });
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
+}
+
+async function generateAllReplies() {
+    try {
+        toast('Generowanie odpowiedzi AI...', 'info');
+        const { job_id, target_count } = await api('POST', `/accounts/${currentAccountId}/comments/generate-replies`, {});
+        toast(`Generowanie ${target_count} odpowiedzi...`, 'info');
+        pollJob(job_id, (job) => { toast(job.progress, 'success'); switchTab('comments'); });
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
+}
+
+async function sendAllReplies() {
+    if (!confirm('Wysłać wszystkie wersje robocze?')) return;
+    try {
+        const { job_id, pending } = await api('POST', `/accounts/${currentAccountId}/comments/send-all`, {});
+        toast(`Wysyłanie ${pending} odpowiedzi...`, 'info');
+        pollJob(job_id, (job) => { toast(job.progress, 'success'); switchTab('comments'); });
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
+}
+
+async function exportComments() {
+    try {
+        const data = await api('GET', `/accounts/${currentAccountId}/comments/export?filter=${commentsFilter}`);
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `comments_${currentAccountId}_${new Date().toISOString().slice(0,10)}.json`;
+        a.click();
+        toast(`Wyeksportowano ${data.count} komentarzy`, 'success');
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
+}
+
+async function importComments(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const result = await api('POST', `/accounts/${currentAccountId}/comments/import`, data);
+        toast(`Zaimportowano ${result.updated} odpowiedzi (pominięto ${result.skipped})`, 'success');
+        switchTab('comments');
+    } catch (e) { toast('Błąd importu: ' + e.message, 'error'); }
+    event.target.value = '';
+}
+
+async function showAISettingsModal() {
+    const [aiSettings, models, tones, currentTone] = await Promise.all([
+        api('GET', '/ai-settings').catch(() => ({})),
+        api('GET', '/ai-models').catch(() => ({})),
+        api('GET', '/ai-tones').catch(() => ({})),
+        api('GET', `/accounts/${currentAccountId}/comment-tone`).catch(() => ({ tone_preset: 'friendly', custom_tone: '' })),
+    ]);
+
+    const providerOptions = ['anthropic', 'openai', 'google'].map(p =>
+        `<option value="${p}" ${aiSettings.provider === p ? 'selected' : ''}>${p === 'anthropic' ? 'Anthropic (Claude)' : p === 'openai' ? 'OpenAI (GPT)' : 'Google (Gemini)'}</option>`
+    ).join('');
+
+    const toneOptions = Object.entries(tones).map(([k, v]) =>
+        `<option value="${k}" ${currentTone.tone_preset === k ? 'selected' : ''}>${k.charAt(0).toUpperCase() + k.slice(1)}</option>`
+    ).join('') + `<option value="custom" ${currentTone.tone_preset === 'custom' ? 'selected' : ''}>Niestandardowy</option>`;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    overlay.innerHTML = `<div class="modal ai-settings-modal">
+        <h3>Ustawienia AI</h3>
+        <div class="form-group">
+            <label>Dostawca AI</label>
+            <select id="ai-provider" onchange="updateModelList()">${providerOptions}</select>
+        </div>
+        <div class="form-group">
+            <label>Klucz API</label>
+            <input type="password" id="ai-api-key" placeholder="${aiSettings.api_key === '***configured***' ? 'Skonfigurowany (wpisz nowy aby zmienić)' : 'Wklej klucz API'}" value="">
+        </div>
+        <div class="form-group">
+            <label>Model</label>
+            <select id="ai-model"></select>
+        </div>
+        <hr>
+        <h4>Ton odpowiedzi (${esc(accounts.find(a => a.id === currentAccountId)?.name || '')})</h4>
+        <div class="form-group">
+            <label>Predefiniowany styl</label>
+            <select id="ai-tone" onchange="document.getElementById('ai-custom-tone').style.display = this.value === 'custom' ? 'block' : 'none'">${toneOptions}</select>
+        </div>
+        <div class="form-group">
+            <textarea id="ai-custom-tone" placeholder="Opisz własny styl odpowiedzi..." style="display:${currentTone.tone_preset === 'custom' ? 'block' : 'none'}">${esc(currentTone.custom_tone || '')}</textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" onclick="this.closest('.modal-overlay').remove()">Anuluj</button>
+            <button class="btn btn-success" onclick="saveAISettings()">Zapisz</button>
+        </div>
+    </div>`;
+    document.body.appendChild(overlay);
+
+    // Store models data globally for the modal
+    window._aiModels = models;
+    updateModelList();
+
+    function updateModelList() {
+        const prov = document.getElementById('ai-provider').value;
+        const sel = document.getElementById('ai-model');
+        const provModels = window._aiModels[prov] || [];
+        sel.innerHTML = provModels.map(m =>
+            `<option value="${m.id}" ${aiSettings.model_name === m.id ? 'selected' : ''}>${m.name}</option>`
+        ).join('');
+    }
+    window.updateModelList = updateModelList;
+}
+
+async function saveAISettings() {
+    try {
+        const provider = document.getElementById('ai-provider').value;
+        const apiKey = document.getElementById('ai-api-key').value;
+        const model = document.getElementById('ai-model').value;
+        const tone = document.getElementById('ai-tone').value;
+        const customTone = document.getElementById('ai-custom-tone').value;
+
+        // Save AI settings (only if key provided)
+        if (apiKey) {
+            await api('PUT', '/ai-settings', { provider, api_key: apiKey, model_name: model });
+        } else if (model) {
+            // Try to save just the model change - need existing key
+            const existing = await api('GET', '/ai-settings');
+            if (existing.provider) {
+                // Can't change without key if not set
+            }
+        }
+
+        // Save tone for current account
+        await api('PUT', `/accounts/${currentAccountId}/comment-tone`, {
+            tone_preset: tone, custom_tone: customTone,
+        });
+
+        document.querySelector('.modal-overlay')?.remove();
+        toast('Ustawienia AI zapisane', 'success');
+    } catch (e) { toast('Błąd: ' + e.message, 'error'); }
 }
 
 // ── Drag & Drop Reorder ─────────────────────────────────────────────
