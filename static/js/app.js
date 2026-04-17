@@ -1254,7 +1254,7 @@ async function copyVideoToAccount(videoId, targetAccountId) {
 
 // ── Comments Tab ────────────────────────────────────────────────────
 
-let commentsFilter = 'all';
+let commentsFilter = 'no_reply';
 
 async function renderComments(container) {
     try {
@@ -1306,14 +1306,24 @@ async function renderComments(container) {
                 byVideo[key].comments.push(c);
             });
 
+            const fixGroupUrl = (url, platform) => {
+                if (!url) return '';
+                if (url.startsWith('http')) return url;
+                if (platform === 'facebook') return 'https://www.facebook.com' + url;
+                if (platform === 'instagram') return 'https://www.instagram.com' + url;
+                return url;
+            };
+
             for (const [vid, group] of Object.entries(byVideo)) {
                 const platBadge = group.platform === 'youtube' ? 'yt' : group.platform === 'instagram' ? 'ig' : 'fb';
                 const platLabel = group.platform === 'youtube' ? 'YT' : group.platform === 'instagram' ? 'IG' : 'FB';
+                const groupUrl = fixGroupUrl(group.url, group.platform);
                 html += `<div class="comment-group">
                     <div class="comment-video-header">
                         <span class="platform-badge ${platBadge}">${platLabel}</span>
-                        <a href="${esc(group.url)}" target="_blank" class="comment-video-title">${esc(group.title || 'Bez tytułu')}</a>
+                        <a href="${esc(groupUrl)}" target="_blank" class="comment-video-title">${esc(group.title || 'Bez tytułu')}</a>
                         <span class="comment-video-count">${group.comments.length} komentarzy</span>
+                        ${groupUrl ? `<a href="${esc(groupUrl)}" target="_blank" class="btn btn-sm comment-open-btn">Otworz</a>` : ''}
                     </div>`;
 
                 group.comments.forEach(c => {
@@ -1322,11 +1332,30 @@ async function renderComments(container) {
                     const statusLabel = {none: '', draft: 'Wersja robocza', edited: 'Edytowano', sending: 'Wysyłanie...', sent: 'Wysłano', failed: 'Błąd'}[c.reply_status] || '';
                     const date = c.comment_date ? new Date(c.comment_date).toLocaleDateString('pl-PL', {day:'numeric',month:'short',year:'numeric'}) : '';
 
+                    // Build direct comment/video links (ensure full URLs)
+                    const fixUrl = (url, platform) => {
+                        if (!url) return '';
+                        if (url.startsWith('http')) return url;
+                        if (platform === 'facebook') return 'https://www.facebook.com' + url;
+                        if (platform === 'instagram') return 'https://www.instagram.com' + url;
+                        return url;
+                    };
+                    const videoFullUrl = fixUrl(c.video_url, c.platform);
+                    let commentLink = '';
+                    if (c.platform === 'youtube' && videoFullUrl && c.platform_comment_id) {
+                        commentLink = videoFullUrl + '&lc=' + c.platform_comment_id;
+                    } else if (c.platform === 'facebook' && c.platform_comment_id) {
+                        commentLink = 'https://www.facebook.com/' + c.platform_comment_id;
+                    } else if (videoFullUrl) {
+                        commentLink = videoFullUrl;
+                    }
+
                     html += `<div class="comment-card" data-id="${c.id}">
                         <div class="comment-header">
-                            <strong class="comment-author">${esc(c.commenter_name)}</strong>
+                            <strong class="comment-author">${c.commenter_profile_url ? `<a href="${esc(c.commenter_profile_url)}" target="_blank">${esc(c.commenter_name)}</a>` : esc(c.commenter_name)}</strong>
                             <span class="comment-date">${date}</span>
                             ${c.like_count ? `<span class="comment-likes">${c.like_count}</span>` : ''}
+                            ${commentLink ? `<a href="${esc(commentLink)}" target="_blank" class="comment-direct-link" title="Zobacz komentarz na platformie">link</a>` : ''}
                             ${c.has_owner_reply && c.reply_status === 'none' ? '<span class="comment-replied-ext">Odpowiedziano</span>' : ''}
                             ${statusLabel ? `<span class="reply-status-badge ${statusCls}">${statusLabel}</span>` : ''}
                         </div>
@@ -1336,7 +1365,7 @@ async function renderComments(container) {
                             <div class="comment-reply-actions">
                                 <button class="btn btn-sm" onclick="saveReply(${c.id})">Zapisz</button>
                                 <button class="btn btn-sm" onclick="generateSingleReply(${c.id})" ${!aiSettings ? 'disabled' : ''}>AI</button>
-                                <button class="btn btn-success btn-sm" onclick="sendSingleReply(${c.id})" ${!c.reply_text ? 'disabled' : ''}>Wyślij</button>
+                                <button class="btn btn-success btn-sm" onclick="sendSingleReply(${c.id})" ${!c.reply_text || c.reply_status === 'sent' ? 'disabled' : ''}>${c.reply_status === 'sent' ? 'Wysłano' : 'Wyślij'}</button>
                                 ${c.reply_error ? `<span class="reply-error" title="${esc(c.reply_error)}">Błąd</span>` : ''}
                             </div>
                         </div>
@@ -1389,7 +1418,9 @@ async function sendSingleReply(commentId) {
     try {
         await api('POST', `/comments/${commentId}/send`);
         toast('Wysłano', 'success');
-        switchTab('comments');
+        // Remove the card from view immediately
+        const card = document.querySelector(`.comment-card[data-id="${commentId}"]`);
+        if (card) card.remove();
     } catch (e) { toast('Błąd: ' + e.message, 'error'); }
 }
 

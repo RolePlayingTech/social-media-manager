@@ -1310,6 +1310,18 @@ body {
 }
 .comment-video-title:hover { color: var(--accent); }
 .comment-video-count { color: var(--text-muted); font-size: 11px; font-family: var(--font-mono); }
+.comment-open-btn { flex-shrink: 0; font-size: 11px !important; padding: 2px 8px !important; }
+.comment-direct-link {
+    font-size: 10px;
+    color: var(--accent);
+    text-decoration: none;
+    font-family: var(--font-mono);
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+.comment-direct-link:hover { opacity: 1; }
+.comment-author a { color: var(--text); text-decoration: none; }
+.comment-author a:hover { color: var(--accent); }
 
 .comment-card {
     padding: 12px;
