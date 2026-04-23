@@ -169,6 +169,7 @@ class AccountUpdate(BaseModel):
     publish_to_ig: Optional[bool] = None
     publish_to_fb: Optional[bool] = None
     publish_to_stories: Optional[bool] = None
+    ig_trial_reels: Optional[bool] = None
     yt_client_id: Optional[str] = None
     yt_client_secret: Optional[str] = None
     yt_refresh_token: Optional[str] = None
@@ -192,6 +193,7 @@ class VideoUpdate(BaseModel):
     target_ig: Optional[bool] = None
     target_fb: Optional[bool] = None
     fb_title: Optional[str] = None
+    is_trial: Optional[bool] = None
 
 class ReorderRequest(BaseModel):
     video_ids: list[int]

@@ -98,17 +98,30 @@ def fetch_ig_account_info(access_token: str, ig_user_id: str = None) -> dict:
     return result
 
 
-def publish_to_instagram(access_token: str, ig_user_id: str, video_url: str, caption: str) -> dict:
+def publish_to_instagram(access_token: str, ig_user_id: str, video_url: str, caption: str, is_trial: bool = False) -> dict:
     """Publish a Reel to Instagram using the Content Publishing API."""
+    IG_CAPTION_LIMIT = 2200
+    if caption and len(caption) > IG_CAPTION_LIMIT:
+        truncated = caption[:IG_CAPTION_LIMIT]
+        # Try to cut at the last sentence boundary
+        last_dot = truncated.rfind('. ')
+        if last_dot > IG_CAPTION_LIMIT // 2:
+            truncated = truncated[:last_dot + 1]
+        caption = truncated
+        logger.info(f"IG caption truncated from {len(caption)} to {len(truncated)} chars")
     try:
         with httpx.Client(timeout=300) as client:
             # Step 1: Create media container
-            create_resp = client.post(f"{GRAPH_API_BASE}/{ig_user_id}/media", data={
+            container_data = {
                 "access_token": access_token,
                 "media_type": "REELS",
                 "video_url": video_url,
                 "caption": caption,
-            })
+            }
+            if is_trial:
+                container_data["trial_params"] = json.dumps({"graduation_strategy": "SS_PERFORMANCE"})
+                logger.info("Publishing as trial reel (SS_PERFORMANCE)")
+            create_resp = client.post(f"{GRAPH_API_BASE}/{ig_user_id}/media", data=container_data)
             create_data = create_resp.json()
             if "id" not in create_data:
                 return {"success": False, "error": f"Container creation failed: {json.dumps(create_data)}"}
@@ -493,8 +506,10 @@ def publish_video(account: dict, video: dict, video_path: str) -> dict:
                         account["fb_access_token"], account["ig_user_id"], video_url
                     )
                 else:
+                    # Determine trial reel: per-video override (is_trial) > account default (ig_trial_reels)
+                    use_trial = video.get("is_trial") if video.get("is_trial") is not None else bool(account.get("ig_trial_reels"))
                     ig_result = publish_to_instagram(
-                        account["fb_access_token"], account["ig_user_id"], video_url, caption
+                        account["fb_access_token"], account["ig_user_id"], video_url, caption, is_trial=use_trial
                     )
                 results["instagram"] = ig_result
             else:

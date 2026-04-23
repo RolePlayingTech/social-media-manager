@@ -63,6 +63,7 @@ def init_db():
                 publish_to_ig BOOLEAN DEFAULT 1,
                 publish_to_fb BOOLEAN DEFAULT 1,
                 publish_to_stories BOOLEAN DEFAULT 0,
+                ig_trial_reels BOOLEAN DEFAULT 0,
                 -- Metadata
                 active BOOLEAN DEFAULT 1,
                 sort_order INTEGER DEFAULT 0,
@@ -105,6 +106,7 @@ def init_db():
                 target_ig BOOLEAN DEFAULT 1,
                 target_fb BOOLEAN DEFAULT 1,
                 fb_title TEXT,
+                is_trial BOOLEAN DEFAULT NULL,
                 -- Queue & status
                 status TEXT DEFAULT 'queued' CHECK(status IN ('queued', 'publishing', 'published', 'failed', 'archived')),
                 queue_position INTEGER DEFAULT 0,
@@ -207,13 +209,13 @@ def create_account(data: dict) -> dict:
                 fb_followers, yt_channel_id, yt_channel_name, yt_channel_pic,
                 yt_subscribers, yt_video_count, yt_client_id, yt_client_secret,
                 yt_refresh_token, publish_to_ig, publish_to_fb, publish_to_stories,
-                active, sort_order)
+                ig_trial_reels, active, sort_order)
             VALUES (:name, :type, :fb_page_id, :fb_page_name, :fb_access_token,
                 :ig_user_id, :ig_username, :ig_profile_pic, :ig_followers, :ig_media_count,
                 :fb_followers, :yt_channel_id, :yt_channel_name, :yt_channel_pic,
                 :yt_subscribers, :yt_video_count, :yt_client_id, :yt_client_secret,
                 :yt_refresh_token, :publish_to_ig, :publish_to_fb, :publish_to_stories,
-                :active, :sort_order)
+                :ig_trial_reels, :active, :sort_order)
         """, {
             "name": data.get("name", ""),
             "type": data.get("type", "instagram_facebook"),
@@ -237,6 +239,7 @@ def create_account(data: dict) -> dict:
             "publish_to_ig": data.get("publish_to_ig", 1),
             "publish_to_fb": data.get("publish_to_fb", 1),
             "publish_to_stories": data.get("publish_to_stories", 0),
+            "ig_trial_reels": data.get("ig_trial_reels", 0),
             "active": data.get("active", 1),
             "sort_order": max_order,
         })
@@ -274,7 +277,7 @@ def update_account(account_id: int, data: dict):
             "ig_media_count", "fb_followers", "yt_channel_id", "yt_channel_name",
             "yt_channel_pic", "yt_subscribers", "yt_video_count", "yt_client_id",
             "yt_client_secret", "yt_refresh_token", "publish_to_ig", "publish_to_fb",
-            "publish_to_stories", "active", "sort_order",
+            "publish_to_stories", "ig_trial_reels", "active", "sort_order",
         ]
         for key in allowed:
             if key in data:
@@ -350,12 +353,12 @@ def add_video(data: dict) -> dict:
                 video_type, duration, file_size, yt_title, yt_description, yt_tags,
                 yt_category, yt_privacy, status, queue_position, subtitle_file,
                 published_at, ig_media_id, ig_permalink, fb_video_id, fb_permalink,
-                yt_video_id, yt_url, target_ig, target_fb, fb_title)
+                yt_video_id, yt_url, target_ig, target_fb, fb_title, is_trial)
             VALUES (:account_id, :filename, :original_filename, :title, :caption,
                 :video_type, :duration, :file_size, :yt_title, :yt_description, :yt_tags,
                 :yt_category, :yt_privacy, :status, :queue_position, :subtitle_file,
                 :published_at, :ig_media_id, :ig_permalink, :fb_video_id, :fb_permalink,
-                :yt_video_id, :yt_url, :target_ig, :target_fb, :fb_title)
+                :yt_video_id, :yt_url, :target_ig, :target_fb, :fb_title, :is_trial)
         """, {
             "account_id": data["account_id"],
             "filename": data["filename"],
@@ -383,6 +386,7 @@ def add_video(data: dict) -> dict:
             "target_ig": data.get("target_ig", 1),
             "target_fb": data.get("target_fb", 1),
             "fb_title": data.get("fb_title"),
+            "is_trial": data.get("is_trial"),
         })
         return dict(conn.execute("SELECT * FROM videos WHERE id = ?", (cur.lastrowid,)).fetchone())
 
@@ -420,6 +424,7 @@ def update_video(video_id: int, data: dict):
             "fb_permalink", "yt_video_id", "yt_url", "error_message",
             "yt_title", "yt_description", "yt_tags", "yt_category", "yt_privacy",
             "thumbnail_time", "subtitle_file", "target_ig", "target_fb", "fb_title",
+            "is_trial",
         ]
         for key in allowed:
             if key in data:

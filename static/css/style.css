@@ -698,11 +698,20 @@ body {
 .platform-badge.fb { background: var(--blue); color: #fff; opacity: 0.8; }
 .platform-badge.yt { background: var(--red); color: #fff; opacity: 0.8; }
 .platform-badge.story { background: var(--yellow); color: #000; opacity: 0.8; }
+.platform-badge.trial { background: #f59e0b; color: #fff; opacity: 0.8; }
 
 .platform-badge.clickable { cursor: pointer; transition: opacity 0.15s; }
 .platform-badge.clickable:hover { opacity: 1; }
 .platform-badge.off { opacity: 0.2; }
 .platform-badge.clickable.off:hover { opacity: 0.5; }
+
+.load-more-bar {
+    text-align: center;
+    padding: 16px;
+}
+.load-more-bar .btn {
+    min-width: 200px;
+}
 
 /* ── Copy Dropdown ── */
 

@@ -8,6 +8,19 @@ let accounts = [];
 let currentAccountId = null;
 let currentTab = 'queue';
 let publishPollTimer = null;
+const PAGE_SIZE = 30;
+
+// Lazy-load video thumbnails when they scroll into view
+const thumbObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+        if (e.isIntersecting) {
+            const video = e.target;
+            const src = video.dataset.src;
+            if (src) { video.src = src; video.removeAttribute('data-src'); }
+            thumbObserver.unobserve(video);
+        }
+    }
+}, { rootMargin: '200px' });
 
 // ── API Helpers ─────────────────────────────────────────────────────
 
@@ -276,12 +289,92 @@ async function switchTab(tab) {
 
 // ── Queue Tab ───────────────────────────────────────────────────────
 
+let _queueVideos = [];
+let _queueShown = 0;
+
+function buildQueueCard(v, i, total, isYT, acc) {
+    const thumb = videoUrl(v.account_id, 'queue', v.filename);
+    const typeLabel = { reel: 'Reel', story: 'Story', short: 'Short', video: 'Film' }[v.video_type] || v.video_type;
+    const caption = v.caption || v.title || v.filename;
+    const size = v.file_size ? fmtSize(v.file_size) : '';
+    const estDate = v.estimated_publish_at ? fmtDateFull(v.estimated_publish_at) : '';
+    let platformBadges = '';
+    if (!isYT) {
+        const igOn = v.target_ig !== 0;
+        const fbOn = v.target_fb !== 0;
+        const trialOn = v.is_trial === 1 || (v.is_trial === null && acc?.ig_trial_reels);
+        platformBadges = `<span class="platform-badge ig clickable ${igOn ? '' : 'off'}" onclick="togglePlatform(event, ${v.id}, 'target_ig', ${igOn ? 'false' : 'true'})" title="Kliknij aby ${igOn ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107'} Instagram">IG</span>`
+            + `<span class="platform-badge fb clickable ${fbOn ? '' : 'off'}" onclick="togglePlatform(event, ${v.id}, 'target_fb', ${fbOn ? 'false' : 'true'})" title="Kliknij aby ${fbOn ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107'} Facebook">FB</span>`
+            + (trialOn ? `<span class="platform-badge trial" title="Rolka pr\u00f3bna (Trial Reel)">T</span>` : '');
+    }
+    return `<div class="video-card" draggable="true" data-id="${v.id}"
+                ondragstart="dragStart(event)" ondragover="dragOver(event)"
+                ondrop="drop(event)" ondragend="dragEnd(event)" ondragleave="dragLeave(event)">
+        <div class="video-position">
+            <input type="number" class="pos-input" value="${i + 1}" min="1" max="${total}"
+                   title="Wpisz numer pozycji"
+                   onkeydown="if(event.key==='Enter'){moveVideoToPos(${v.id},this.value,${total});this.blur()}"
+                   onblur="moveVideoToPos(${v.id},this.value,${total})"
+                   data-orig="${i + 1}">
+        </div>
+        <div class="video-thumbnail">
+            <video data-src="${thumb}#t=0.5" preload="none" muted
+                   onclick="if(!this.src||this.src===location.href){this.src=this.dataset.src}this.paused?this.play():this.pause()"></video>
+        </div>
+        <div class="video-info">
+            <div class="video-title">${esc(v.title || v.filename)}</div>
+            <div class="video-caption-preview">${esc(caption).substring(0, 120)}</div>
+            <div class="video-meta">
+                <span class="status-badge queued">${typeLabel}</span>
+                ${platformBadges}
+                <span>${size}</span>
+                ${estDate ? `<span class="est-date" title="Planowana publikacja">\u{1F4C5} ${estDate}</span>` : ''}
+            </div>
+        </div>
+        <div class="video-actions">
+            <button class="btn btn-sm" onclick="window.open('${thumb}', '_blank')" title="Otw\u00f3rz wideo">\u25b6</button>
+            <button class="btn btn-sm" onclick="showEditVideoModal(${v.id})">Edytuj</button>
+            <button class="btn btn-success btn-sm" onclick="publishNow(${v.id})">Publikuj</button>
+            <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'up', ${currentAccountId})" ${i === 0 ? 'disabled' : ''}>\u2191</button>
+            <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'down', ${currentAccountId})" ${i === total - 1 ? 'disabled' : ''}>\u2193</button>
+            <button class="btn btn-sm" onclick="showCopyDropdown(event, ${v.id})" title="Kopiuj do innego konta">\u29C9</button>
+            <button class="btn btn-danger btn-sm" onclick="confirmDeleteVideo(${v.id})">\u2717</button>
+        </div>
+    </div>`;
+}
+
+function showMoreQueue() {
+    const acc = accounts.find(a => a.id === currentAccountId);
+    const isYT = acc?.type === 'youtube';
+    const list = document.getElementById('video-queue');
+    const end = Math.min(_queueShown + PAGE_SIZE, _queueVideos.length);
+    let html = '';
+    for (let i = _queueShown; i < end; i++) {
+        html += buildQueueCard(_queueVideos[i], i, _queueVideos.length, isYT, acc);
+    }
+    // Remove old "load more" button
+    const oldBtn = document.getElementById('queue-load-more');
+    if (oldBtn) oldBtn.remove();
+    list.insertAdjacentHTML('beforeend', html);
+    _queueShown = end;
+    // Observe new thumbnails for lazy loading
+    list.querySelectorAll('video[data-src]').forEach(v => thumbObserver.observe(v));
+    // Add "load more" if needed
+    if (_queueShown < _queueVideos.length) {
+        list.insertAdjacentHTML('beforeend',
+            `<div id="queue-load-more" class="load-more-bar">
+                <button class="btn" onclick="showMoreQueue()">Poka\u017c wi\u0119cej (${_queueVideos.length - _queueShown} pozosta\u0142o)</button>
+            </div>`);
+    }
+}
+
 async function renderQueue(container) {
     const acc = accounts.find(a => a.id === currentAccountId);
     const isYT = acc?.type === 'youtube';
     try {
-        const videos = await api('GET', `/accounts/${currentAccountId}/videos?status=queued`);
-        if (videos.length === 0) {
+        _queueVideos = await api('GET', `/accounts/${currentAccountId}/videos?status=queued`);
+        _queueShown = 0;
+        if (_queueVideos.length === 0) {
             container.innerHTML = `<div class="tab-content active">
                 <div class="empty-state">
                     <div class="empty-state-icon">\u{1F4F9}</div>
@@ -292,65 +385,13 @@ async function renderQueue(container) {
             return;
         }
 
-        let html = `<div class="tab-content active">
+        container.innerHTML = `<div class="tab-content active">
             <div class="queue-header">
-                <h3>Kolejka <span class="queue-count">(${videos.length} film\u00f3w)</span></h3>
+                <h3>Kolejka <span class="queue-count">(${_queueVideos.length} film\u00f3w)</span></h3>
             </div>
-            <div class="video-list" id="video-queue">`;
-
-        videos.forEach((v, i) => {
-            const thumb = videoUrl(v.account_id, 'queue', v.filename);
-            const typeLabel = { reel: 'Reel', story: 'Story', short: 'Short', video: 'Film' }[v.video_type] || v.video_type;
-            const caption = v.caption || v.title || v.filename;
-            const size = v.file_size ? fmtSize(v.file_size) : '';
-            const estDate = v.estimated_publish_at ? fmtDateFull(v.estimated_publish_at) : '';
-            // Platform badges for IG+FB accounts
-            let platformBadges = '';
-            if (!isYT) {
-                const igOn = v.target_ig !== 0;
-                const fbOn = v.target_fb !== 0;
-                platformBadges = `<span class="platform-badge ig clickable ${igOn ? '' : 'off'}" onclick="togglePlatform(event, ${v.id}, 'target_ig', ${igOn ? 'false' : 'true'})" title="Kliknij aby ${igOn ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107'} Instagram">IG</span>`
-                    + `<span class="platform-badge fb clickable ${fbOn ? '' : 'off'}" onclick="togglePlatform(event, ${v.id}, 'target_fb', ${fbOn ? 'false' : 'true'})" title="Kliknij aby ${fbOn ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107'} Facebook">FB</span>`;
-            }
-
-            html += `<div class="video-card" draggable="true" data-id="${v.id}"
-                        ondragstart="dragStart(event)" ondragover="dragOver(event)"
-                        ondrop="drop(event)" ondragend="dragEnd(event)" ondragleave="dragLeave(event)">
-                <div class="video-position">
-                    <input type="number" class="pos-input" value="${i + 1}" min="1" max="${videos.length}"
-                           title="Wpisz numer pozycji"
-                           onkeydown="if(event.key==='Enter'){moveVideoToPos(${v.id},this.value,${videos.length});this.blur()}"
-                           onblur="moveVideoToPos(${v.id},this.value,${videos.length})"
-                           data-orig="${i + 1}">
-                </div>
-                <div class="video-thumbnail">
-                    <video src="${thumb}#t=0.5" preload="metadata" muted
-                           onclick="this.paused ? this.play() : this.pause()"></video>
-                </div>
-                <div class="video-info">
-                    <div class="video-title">${esc(v.title || v.filename)}</div>
-                    <div class="video-caption-preview">${esc(caption).substring(0, 120)}</div>
-                    <div class="video-meta">
-                        <span class="status-badge queued">${typeLabel}</span>
-                        ${platformBadges}
-                        <span>${size}</span>
-                        ${estDate ? `<span class="est-date" title="Planowana publikacja">\u{1F4C5} ${estDate}</span>` : ''}
-                    </div>
-                </div>
-                <div class="video-actions">
-                    <button class="btn btn-sm" onclick="window.open('${thumb}', '_blank')" title="Otw\u00f3rz wideo">\u25b6</button>
-                    <button class="btn btn-sm" onclick="showEditVideoModal(${v.id})">Edytuj</button>
-                    <button class="btn btn-success btn-sm" onclick="publishNow(${v.id})">Publikuj</button>
-                    <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'up', ${currentAccountId})" ${i === 0 ? 'disabled' : ''}>\u2191</button>
-                    <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'down', ${currentAccountId})" ${i === videos.length - 1 ? 'disabled' : ''}>\u2193</button>
-                    <button class="btn btn-sm" onclick="showCopyDropdown(event, ${v.id})" title="Kopiuj do innego konta">\u29C9</button>
-                    <button class="btn btn-danger btn-sm" onclick="confirmDeleteVideo(${v.id})">\u2717</button>
-                </div>
-            </div>`;
-        });
-
-        html += '</div></div>';
-        container.innerHTML = html;
+            <div class="video-list" id="video-queue"></div>
+        </div>`;
+        showMoreQueue();
     } catch (e) {
         container.innerHTML = `<div class="tab-content active"><p style="color:var(--red)">B\u0142\u0105d: ${e.message}</p></div>`;
     }
@@ -358,9 +399,19 @@ async function renderQueue(container) {
 
 async function togglePlatform(event, videoId, field, value) {
     event.stopPropagation();
+    const badge = event.target;
     try {
         await api('PUT', `/videos/${videoId}`, { [field]: value });
-        await renderQueue(document.getElementById('tab-content-area'));
+        // Toggle badge state in-place instead of re-rendering entire queue
+        const newValue = (value === 'true' || value === true);
+        badge.classList.toggle('off', !newValue);
+        const label = field === 'target_ig' ? 'Instagram' : 'Facebook';
+        const action = newValue ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107';
+        badge.title = `Kliknij aby ${action} ${label}`;
+        badge.setAttribute('onclick', `togglePlatform(event, ${videoId}, '${field}', ${!newValue})`);
+        // Update cached data
+        const cached = _queueVideos.find(v => v.id === videoId);
+        if (cached) cached[field] = newValue ? 1 : 0;
     } catch (e) {
         toast('B\u0142\u0105d: ' + e.message, 'error');
     }
@@ -371,6 +422,60 @@ async function togglePlatform(event, videoId, field, value) {
 let publishedFilter = 'all'; // 'all', 'ig', 'fb', 'yt'
 let publishedSort = 'newest'; // 'newest', 'oldest'
 
+let _publishedAll = [];
+let _publishedShown = 0;
+
+function buildPublishedCard(v) {
+    const isFailed = v.status === 'failed';
+    const platforms = [];
+    if (v.ig_permalink || v.ig_media_id) platforms.push(`<a href="${v.ig_permalink || '#'}" target="_blank" class="platform-badge ig">IG</a>`);
+    if (v.fb_permalink || v.fb_video_id) platforms.push(`<a href="${v.fb_permalink || '#'}" target="_blank" class="platform-badge fb">FB</a>`);
+    if (v.yt_url || v.yt_video_id) platforms.push(`<a href="${v.yt_url || '#'}" target="_blank" class="platform-badge yt">YT</a>`);
+    const dateStr = v.published_at ? fmtDate(v.published_at) : fmtDate(v.created_at);
+    const thumbSrc = videoUrl(v.account_id, isFailed ? 'queue' : 'archive', v.filename) + '#t=0.5';
+    return `<div class="published-card" style="${isFailed ? 'border-color:var(--red-dim)' : ''}">
+        <div class="video-thumbnail">
+            <video data-src="${thumbSrc}" preload="none" muted
+                   onclick="if(!this.src||this.src===location.href){this.src=this.dataset.src}this.paused?this.play():this.pause()"
+                   onerror="this.style.display='none'"></video>
+        </div>
+        <div class="video-info">
+            <div class="video-title">${esc(v.yt_title || v.title || v.filename)}</div>
+            <div class="video-caption-preview">${esc(v.caption || '').substring(0, 100)}</div>
+            <div class="video-meta">
+                <span class="status-badge ${v.status}">${v.status === 'failed' ? 'B\u0141\u0104D' : 'LIVE'}</span>
+                <span>${dateStr}</span>
+            </div>
+            <div class="published-platforms" style="margin-top:4px">${platforms.join(' ')}</div>
+            ${isFailed ? `<div style="color:var(--red);font-size:11px;margin-top:4px">${esc(v.error_message || '')}</div>` : ''}
+        </div>
+        <div class="video-actions">
+            ${isFailed ? `<button class="btn btn-sm" onclick="retryVideo(${v.id})">Pon\u00f3w</button>` : ''}
+            ${isFailed ? `<button class="btn btn-danger btn-sm" onclick="confirmDeleteVideo(${v.id})">\u2717</button>` : ''}
+        </div>
+    </div>`;
+}
+
+function showMorePublished() {
+    const list = document.getElementById('published-list');
+    const end = Math.min(_publishedShown + PAGE_SIZE, _publishedAll.length);
+    let html = '';
+    for (let i = _publishedShown; i < end; i++) {
+        html += buildPublishedCard(_publishedAll[i]);
+    }
+    const oldBtn = document.getElementById('pub-load-more');
+    if (oldBtn) oldBtn.remove();
+    list.insertAdjacentHTML('beforeend', html);
+    _publishedShown = end;
+    list.querySelectorAll('video[data-src]').forEach(v => thumbObserver.observe(v));
+    if (_publishedShown < _publishedAll.length) {
+        list.insertAdjacentHTML('beforeend',
+            `<div id="pub-load-more" class="load-more-bar">
+                <button class="btn" onclick="showMorePublished()">Poka\u017c wi\u0119cej (${_publishedAll.length - _publishedShown} pozosta\u0142o)</button>
+            </div>`);
+    }
+}
+
 async function renderPublished(container) {
     try {
         const videos = await api('GET', `/accounts/${currentAccountId}/videos?status=published`);
@@ -379,14 +484,12 @@ async function renderPublished(container) {
         const acc = accounts.find(a => a.id === currentAccountId);
         const isYT = acc?.type === 'youtube';
 
-        // Sort
         all.sort((a, b) => {
             const da = new Date(a.published_at || a.created_at || 0);
             const db2 = new Date(b.published_at || b.created_at || 0);
             return publishedSort === 'newest' ? db2 - da : da - db2;
         });
 
-        // Filter by platform
         if (publishedFilter === 'ig') all = all.filter(v => v.ig_media_id || v.ig_permalink);
         else if (publishedFilter === 'fb') all = all.filter(v => v.fb_video_id || v.fb_permalink);
         else if (publishedFilter === 'yt') all = all.filter(v => v.yt_video_id || v.yt_url);
@@ -402,7 +505,10 @@ async function renderPublished(container) {
             return;
         }
 
-        let html = `<div class="tab-content active">
+        _publishedAll = all;
+        _publishedShown = 0;
+
+        container.innerHTML = `<div class="tab-content active">
             <div class="published-toolbar">
                 <div class="published-filters">
                     <button class="btn btn-sm ${publishedFilter === 'all' ? 'active' : ''}" onclick="setPublishedFilter('all')">Wszystkie (${videos.length + failed.length})</button>
@@ -417,40 +523,9 @@ async function renderPublished(container) {
                     </select>
                 </div>
             </div>
-            <div class="video-list">`;
-
-        for (const v of all) {
-            const isFailed = v.status === 'failed';
-            const platforms = [];
-            if (v.ig_permalink || v.ig_media_id) platforms.push(`<a href="${v.ig_permalink || '#'}" target="_blank" class="platform-badge ig">IG</a>`);
-            if (v.fb_permalink || v.fb_video_id) platforms.push(`<a href="${v.fb_permalink || '#'}" target="_blank" class="platform-badge fb">FB</a>`);
-            if (v.yt_url || v.yt_video_id) platforms.push(`<a href="${v.yt_url || '#'}" target="_blank" class="platform-badge yt">YT</a>`);
-            const dateStr = v.published_at ? fmtDate(v.published_at) : fmtDate(v.created_at);
-
-            html += `<div class="published-card" style="${isFailed ? 'border-color:var(--red-dim)' : ''}">
-                <div class="video-thumbnail">
-                    <video src="${videoUrl(v.account_id, isFailed ? 'queue' : 'archive', v.filename)}#t=0.5"
-                           preload="metadata" muted onclick="this.paused ? this.play() : this.pause()"
-                           onerror="this.style.display='none'"></video>
-                </div>
-                <div class="video-info">
-                    <div class="video-title">${esc(v.yt_title || v.title || v.filename)}</div>
-                    <div class="video-caption-preview">${esc(v.caption || '').substring(0, 100)}</div>
-                    <div class="video-meta">
-                        <span class="status-badge ${v.status}">${v.status === 'failed' ? 'B\u0141\u0104D' : 'LIVE'}</span>
-                        <span>${dateStr}</span>
-                    </div>
-                    <div class="published-platforms" style="margin-top:4px">${platforms.join(' ')}</div>
-                    ${isFailed ? `<div style="color:var(--red);font-size:11px;margin-top:4px">${esc(v.error_message || '')}</div>` : ''}
-                </div>
-                <div class="video-actions">
-                    ${isFailed ? `<button class="btn btn-sm" onclick="retryVideo(${v.id})">Pon\u00f3w</button>` : ''}
-                    ${isFailed ? `<button class="btn btn-danger btn-sm" onclick="confirmDeleteVideo(${v.id})">\u2717</button>` : ''}
-                </div>
-            </div>`;
-        }
-        html += '</div></div>';
-        container.innerHTML = html;
+            <div class="video-list" id="published-list"></div>
+        </div>`;
+        showMorePublished();
     } catch (e) {
         container.innerHTML = `<div class="tab-content active"><p style="color:var(--red)">B\u0142\u0105d: ${e.message}</p></div>`;
     }
@@ -777,6 +852,16 @@ async function renderSchedule(container) {
                         </label>
                     </div>
                 </div>
+                <div class="schedule-field" style="margin-top:12px">
+                    <label>Rolki pr\u00f3bne (Trial Reels)</label>
+                    <div class="platform-toggles">
+                        <label class="platform-toggle">
+                            <input type="checkbox" id="sched-trial" ${acc.ig_trial_reels ? 'checked' : ''}>
+                            Wszystkie rolki jako pr\u00f3bne
+                        </label>
+                    </div>
+                    <div class="schedule-hint">Rolki pr\u00f3bne s\u0105 najpierw pokazywane tylko nieobserwuj\u0105cym. Je\u015bli dobrze performuj\u0105, trafiaj\u0105 do obserwuj\u0105cych.</div>
+                </div>
             </div>`;
         }
 
@@ -884,6 +969,7 @@ async function saveSchedule() {
                 publish_to_ig: document.getElementById('sched-ig')?.checked ?? true,
                 publish_to_fb: document.getElementById('sched-fb')?.checked ?? true,
                 publish_to_stories: document.getElementById('sched-stories')?.checked ?? false,
+                ig_trial_reels: document.getElementById('sched-trial')?.checked ?? false,
             });
         }
 
@@ -1697,6 +1783,10 @@ async function showEditVideoModal(videoId) {
                         <input type="checkbox" id="edit-target-fb" ${video.target_fb !== 0 ? 'checked' : ''}>
                         Facebook
                     </label>
+                    <label class="platform-toggle">
+                        <input type="checkbox" id="edit-is-trial" ${video.is_trial === 1 ? 'checked' : ''}>
+                        Rolka pr\u00f3bna
+                    </label>
                 </div>
             </div>
             <div class="form-group">
@@ -1771,6 +1861,8 @@ async function saveVideoEdit(videoId) {
     if (targetFb) data.target_fb = targetFb.checked;
     const fbTitle = document.getElementById('edit-fb-title');
     if (fbTitle) data.fb_title = fbTitle.value;
+    const isTrial = document.getElementById('edit-is-trial');
+    if (isTrial) data.is_trial = isTrial.checked;
 
     try {
         await api('PUT', `/videos/${videoId}`, data);
