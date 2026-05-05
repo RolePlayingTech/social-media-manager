@@ -54,6 +54,7 @@ for a in json.load(sys.stdin):
     echo "  swiadek-jutra    → Świadek Jutra"
     echo "  roleplayinglife  → RolePlayingLife"
     echo "  rpl              → RolePlayingLife"
+    echo "  crewly           → crewly"
     exit 0
 fi
 
@@ -76,6 +77,7 @@ declare -A ALIASES=(
     ["swiadek-jutra"]="Świadek Jutra"
     ["roleplayinglife"]="RolePlayingLife"
     ["rpl"]="RolePlayingLife"
+    ["crewly"]="crewly"
 )
 
 INPUT_QUERY="$1"
@@ -83,6 +85,12 @@ ALIAS_KEY=$(echo "$INPUT_QUERY" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
 ACCOUNT_QUERY="${ALIASES[$ALIAS_KEY]:-$INPUT_QUERY}"
 SOURCE_DIR="$2"
 VIDEO_TYPE="${3:-reel}"
+
+# Optional flag to skip cleanup (used when chaining upload scripts)
+NO_CLEANUP=false
+for _arg in "$@"; do
+    [ "$_arg" = "--no-cleanup" ] && NO_CLEANUP=true
+done
 
 if [[ ! "$VIDEO_TYPE" =~ ^(reel|story|short|video)$ ]]; then
     echo -e "${RED}Unknown type '$VIDEO_TYPE'. Allowed: reel, story, short, video${NC}"
@@ -224,9 +232,9 @@ echo -e "  Result: ${GREEN}${SUCCESS} OK${NC} / ${RED}${FAILED} failed${NC} / ${
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
 
 # Clean up source directory after successful upload
-if [ $FAILED -eq 0 ] && [ "$SOURCE_DIR" = "/tmp/upload" ] || [ "$SOURCE_DIR" = "/tmp/upload/" ]; then
-    rm -f "${SOURCE_DIR}"/*.mp4 "${SOURCE_DIR}"/*.mov "${SOURCE_DIR}"/*.avi "${SOURCE_DIR}"/*.mkv "${SOURCE_DIR}"/*.webm
-    rm -f "${SOURCE_DIR}"/*.txt "${SOURCE_DIR}"/*.srt
+if [ "$NO_CLEANUP" != "true" ] && [ $FAILED -eq 0 ] && [[ "$SOURCE_DIR" =~ ^/tmp/upload/?$ ]]; then
+    rm -f "${SOURCE_DIR%/}"/*.mp4 "${SOURCE_DIR%/}"/*.mov "${SOURCE_DIR%/}"/*.avi "${SOURCE_DIR%/}"/*.mkv "${SOURCE_DIR%/}"/*.webm
+    rm -f "${SOURCE_DIR%/}"/*.txt "${SOURCE_DIR%/}"/*.srt
     echo -e "  ${CYAN}Cleaned up ${SOURCE_DIR}${NC}"
 fi
 

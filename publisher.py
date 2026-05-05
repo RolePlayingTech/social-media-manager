@@ -21,9 +21,9 @@ def get_video_path(account_id: int, filename: str, subdir: str = "queue") -> str
     return os.path.join(UPLOAD_DIR, str(account_id), subdir, filename)
 
 
-def get_video_url_for_api(account_id: int, filename: str) -> str | None:
+def get_video_url_for_api(account_id: int, filename: str, subdir: str = "queue") -> str | None:
     """Upload video to tmpfiles.org and return URL for API consumption."""
-    path = get_video_path(account_id, filename)
+    path = get_video_path(account_id, filename, subdir)
     if not os.path.exists(path):
         logger.error(f"Video file not found: {path}")
         return None
@@ -217,10 +217,135 @@ def publish_story_to_instagram(access_token: str, ig_user_id: str, video_url: st
         return {"success": False, "error": str(e)}
 
 
+def publish_story_to_facebook(access_token: str, page_id: str, video_path: str) -> dict:
+    """Publish a photo story to a Facebook Page (extracted frame from video).
+    Note: FB video story upload (rupload.facebook.com) requires special app access
+    not available here; we use a photo story extracted from the video frame instead."""
+    import tempfile, subprocess as _sp
+    try:
+        with httpx.Client(timeout=60) as client:
+            resp = client.get(f"{GRAPH_API_BASE}/{page_id}", params={
+                "access_token": access_token,
+                "fields": "access_token",
+            })
+            page_token = resp.json().get("access_token", access_token)
+
+        # Extract a frame at 5 seconds (or start of video)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            thumb_path = tf.name
+        _sp.run(
+            ["ffmpeg", "-y", "-ss", "5", "-i", video_path,
+             "-vframes", "1", "-q:v", "2", thumb_path],
+            capture_output=True, timeout=30,
+        )
+        if not os.path.exists(thumb_path) or os.path.getsize(thumb_path) == 0:
+            return {"success": False, "error": "Could not extract frame from video for FB photo story"}
+
+        try:
+            with httpx.Client(timeout=60) as client:
+                # Upload photo (unpublished)
+                with open(thumb_path, "rb") as f:
+                    r = client.post(f"{GRAPH_API_BASE}/{page_id}/photos", data={
+                        "access_token": page_token,
+                        "published": "false",
+                    }, files={"source": ("frame.jpg", f, "image/jpeg")})
+                photo_data = r.json()
+                photo_id = photo_data.get("id")
+                if not photo_id:
+                    return {"success": False, "error": f"FB photo upload failed: {json.dumps(photo_data)}"}
+
+                # Create photo story
+                r2 = client.post(f"{GRAPH_API_BASE}/{page_id}/photo_stories", data={
+                    "access_token": page_token,
+                    "photo_id": photo_id,
+                })
+                result = r2.json()
+                if not result.get("success"):
+                    return {"success": False, "error": f"FB photo story failed: {json.dumps(result)}"}
+
+                logger.info(f"FB photo story published: post_id={result.get('post_id')}")
+                return {"success": True, "post_id": result.get("post_id")}
+        finally:
+            try:
+                os.unlink(thumb_path)
+            except OSError:
+                pass
+
+    except Exception as e:
+        logger.error(f"FB photo story error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # ── Facebook Publishing ─────────────────────────────────────────────
 
+def _publish_to_facebook_resumable(page_token: str, page_id: str, video_path: str, description: str) -> dict:
+    """Resumable upload for large FB videos (>~50MB). Uses upload_phase=start/transfer/finish."""
+    file_size = os.path.getsize(video_path)
+    endpoint = f"{GRAPH_API_BASE}/{page_id}/videos"
+
+    with httpx.Client(timeout=600) as client:
+        # 1. start
+        r = client.post(endpoint, data={
+            "access_token": page_token,
+            "upload_phase": "start",
+            "file_size": str(file_size),
+        })
+        start = r.json()
+        if "upload_session_id" not in start:
+            return {"success": False, "error": f"FB resumable start failed: {json.dumps(start)}"}
+        session_id = start["upload_session_id"]
+        video_id = start.get("video_id")
+        start_off = int(start["start_offset"])
+        end_off = int(start["end_offset"])
+        logger.info(f"FB resumable start: session={session_id} video_id={video_id} chunks=~{file_size}B")
+
+        # 2. transfer chunks
+        with open(video_path, "rb") as f:
+            while start_off < end_off:
+                f.seek(start_off)
+                chunk = f.read(end_off - start_off)
+                files = {"video_file_chunk": ("chunk", chunk, "application/octet-stream")}
+                r = client.post(endpoint, data={
+                    "access_token": page_token,
+                    "upload_phase": "transfer",
+                    "upload_session_id": session_id,
+                    "start_offset": str(start_off),
+                }, files=files)
+                t = r.json()
+                if "start_offset" not in t or "end_offset" not in t:
+                    return {"success": False, "error": f"FB resumable transfer failed at {start_off}: {json.dumps(t)}"}
+                new_start = int(t["start_offset"])
+                new_end = int(t["end_offset"])
+                logger.debug(f"FB resumable chunk: {start_off}..{end_off} → next {new_start}..{new_end}")
+                if new_start == new_end:
+                    break
+                start_off, end_off = new_start, new_end
+        logger.info(f"FB resumable: all chunks uploaded ({file_size} bytes), finalizing…")
+
+        # 3. finish
+        r = client.post(endpoint, data={
+            "access_token": page_token,
+            "upload_phase": "finish",
+            "upload_session_id": session_id,
+            "description": description or "",
+        })
+        fin = r.json()
+        if not fin.get("success"):
+            return {"success": False, "error": f"FB resumable finish failed: {json.dumps(fin)}"}
+
+        return {
+            "success": True,
+            "video_id": video_id,
+            "permalink": f"https://www.facebook.com/{page_id}/videos/{video_id}",
+        }
+
+
+# Use resumable for any video > 40 MB to be safe (FB rejects ~100MB+ via simple POST)
+RESUMABLE_THRESHOLD = 40 * 1024 * 1024
+
+
 def publish_to_facebook(access_token: str, page_id: str, video_path: str, description: str) -> dict:
-    """Publish a video to Facebook Page via curl with config file (no token in ps)."""
+    """Publish a video to Facebook Page. Uses resumable upload for large files."""
     import subprocess
     import tempfile
     try:
@@ -232,8 +357,12 @@ def publish_to_facebook(access_token: str, page_id: str, video_path: str, descri
             })
             page_token = resp.json().get("access_token", access_token)
 
-        # Write curl config to temp file (keeps token and description out of ps aux)
-        # Escape newlines and double quotes so they don't break curl -K format
+        # Large videos must go through the resumable upload protocol — FB returns 413 otherwise.
+        if os.path.getsize(video_path) >= RESUMABLE_THRESHOLD:
+            logger.info(f"FB upload: using resumable protocol (size={os.path.getsize(video_path)})")
+            return _publish_to_facebook_resumable(page_token, page_id, video_path, description)
+
+        # Small videos: simple non-resumable POST via curl
         safe_desc = (description or "").replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "\\n")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".curl", delete=False) as cf:
             cf.write(f'-F "access_token={page_token}"\n')
@@ -250,13 +379,12 @@ def publish_to_facebook(access_token: str, page_id: str, video_path: str, descri
         finally:
             os.remove(config_path)
 
-        logger.info(f"FB curl response: {result.stdout[:500]}")
-        if result.stderr:
-            logger.error(f"FB curl stderr: {result.stderr[:500]}")
+        logger.info(f"FB curl rc={result.returncode} stdout={result.stdout[:600]!r} stderr={result.stderr[:600]!r}")
 
         data = json.loads(result.stdout) if result.stdout.strip() else {}
-        if not data and result.returncode != 0:
-            return {"success": False, "error": f"curl failed (rc={result.returncode}): {result.stderr[:200]}"}
+        if not data:
+            return {"success": False,
+                    "error": f"FB upload returned no body (curl rc={result.returncode}, stderr={result.stderr[:200] or 'empty'})"}
 
         if "id" in data:
             return {
@@ -265,7 +393,6 @@ def publish_to_facebook(access_token: str, page_id: str, video_path: str, descri
                 "permalink": f"https://www.facebook.com/{page_id}/videos/{data['id']}",
             }
 
-        # FB sometimes returns error code 1 (rate limit) but still processes the upload
         error = data.get("error", {})
         if error.get("code") == 1:
             logger.warning(f"FB returned rate-limit error — upload may have succeeded")
@@ -279,6 +406,36 @@ def publish_to_facebook(access_token: str, page_id: str, video_path: str, descri
 
     except Exception as e:
         logger.error(f"Facebook publish error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def post_fb_video_comment(access_token: str, page_id: str, video_id: str, message: str) -> dict:
+    """Post a comment under a freshly-published Facebook video, using a Page token."""
+    try:
+        with httpx.Client(timeout=30) as client:
+            pt_resp = client.get(f"{GRAPH_API_BASE}/{page_id}", params={
+                "access_token": access_token, "fields": "access_token",
+            })
+            page_token = pt_resp.json().get("access_token", access_token)
+
+            # Wait briefly for the video object to become available for comments
+            for attempt in range(6):
+                resp = client.post(f"{GRAPH_API_BASE}/{video_id}/comments", data={
+                    "access_token": page_token,
+                    "message": message,
+                })
+                data = resp.json()
+                if "id" in data:
+                    return {"success": True, "comment_id": data["id"]}
+                err = data.get("error", {}) or {}
+                # 100 / not-yet-published — back off and retry
+                if err.get("code") in (100, 1, 2) and attempt < 5:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                return {"success": False, "error": err.get("message") or json.dumps(data)}
+        return {"success": False, "error": "Comment post: out of retries"}
+    except Exception as e:
+        logger.error(f"FB comment post error: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -373,6 +530,12 @@ def publish_to_youtube(client_id: str, client_secret: str, refresh_token: str,
         if is_short and "#Shorts" not in title:
             title = f"{title} #Shorts"
 
+        # YouTube limits: title 100 chars, description 5000 chars
+        if len(title) > 100:
+            title = title[:97] + "..."
+        if description and len(description) > 5000:
+            description = description[:4990] + "\n..."
+
         metadata = {
             "snippet": {
                 "title": title,
@@ -444,6 +607,43 @@ def publish_to_youtube(client_id: str, client_secret: str, refresh_token: str,
         return {"success": False, "error": str(e)}
 
 
+def post_yt_video_comment(client_id: str, client_secret: str, refresh_token: str,
+                           video_id: str, message: str) -> dict:
+    """Post a top-level comment under a YouTube video as the channel owner."""
+    try:
+        access_token = _get_yt_access_token(client_id, client_secret, refresh_token)
+        if not access_token:
+            return {"success": False, "error": "Token refresh failed"}
+        # YouTube needs a brief delay after upload before commenting works
+        for attempt in range(6):
+            with httpx.Client(timeout=30) as client:
+                resp = client.post(
+                    "https://www.googleapis.com/youtube/v3/commentThreads",
+                    params={"part": "snippet"},
+                    headers={"Authorization": f"Bearer {access_token}",
+                             "Content-Type": "application/json"},
+                    json={"snippet": {
+                        "videoId": video_id,
+                        "topLevelComment": {"snippet": {"textOriginal": message}},
+                    }},
+                )
+                data = resp.json()
+                if "id" in data:
+                    return {"success": True, "comment_id": data["id"]}
+                err = data.get("error", {}) or {}
+                # videoNotFound is transient right after upload
+                code = err.get("code")
+                msg = err.get("message", "")
+                if (code == 404 or "video" in msg.lower()) and attempt < 5:
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                return {"success": False, "error": msg or json.dumps(data)}
+        return {"success": False, "error": "YouTube comment: out of retries"}
+    except Exception as e:
+        logger.error(f"YouTube comment post error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 def upload_youtube_subtitles(access_token: str, video_id: str, srt_path: str,
                               language: str = "en", name: str = "English") -> bool:
     """Upload SRT subtitles to a YouTube video via Captions API."""
@@ -482,6 +682,152 @@ def upload_youtube_subtitles(access_token: str, video_id: str, srt_path: str,
             return False
 
 
+# ── YouTube Thumbnail ──────────────────────────────────────────────
+
+def upload_youtube_thumbnail(access_token: str, video_id: str, thumbnail_path: str) -> bool:
+    """Upload a custom thumbnail for a YouTube video."""
+    try:
+        with open(thumbnail_path, "rb") as f:
+            thumb_data = f.read()
+        content_type = "image/png" if thumbnail_path.lower().endswith(".png") else "image/jpeg"
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(
+                "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+                params={"videoId": video_id, "uploadType": "media"},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": content_type,
+                },
+                content=thumb_data,
+            )
+            if resp.status_code == 200:
+                logger.info(f"Thumbnail uploaded for video {video_id}")
+                return True
+            else:
+                logger.warning(f"Thumbnail upload returned {resp.status_code}: {resp.text[:200]}")
+                return False
+    except Exception as e:
+        logger.warning(f"Thumbnail upload error for {video_id}: {e}")
+        return False
+
+
+# ── Facebook Captions ──────────────────────────────────────────────
+
+def upload_facebook_captions(access_token: str, video_id: str, srt_path: str, locale: str = "pl_PL") -> bool:
+    """Upload SRT captions to a Facebook video."""
+    try:
+        with open(srt_path, "rb") as f:
+            srt_data = f.read()
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(
+                f"{GRAPH_API_BASE}/{video_id}/captions",
+                data={"access_token": access_token, "locale": locale, "default": "true"},
+                files={"captions_file": (f"captions.{locale}.srt", srt_data, "text/plain")},
+            )
+            if resp.status_code == 200:
+                logger.info(f"FB captions uploaded for video {video_id}")
+                return True
+            else:
+                logger.warning(f"FB caption upload returned {resp.status_code}: {resp.text[:200]}")
+                return False
+    except Exception as e:
+        logger.warning(f"FB caption upload error for {video_id}: {e}")
+        return False
+
+
+def upload_facebook_thumbnail(access_token: str, video_id: str, thumbnail_path: str) -> bool:
+    """Upload a custom thumbnail for a Facebook video."""
+    try:
+        content_type = "image/png" if thumbnail_path.lower().endswith(".png") else "image/jpeg"
+        with open(thumbnail_path, "rb") as f:
+            thumb_data = f.read()
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(
+                f"{GRAPH_API_BASE}/{video_id}",
+                data={"access_token": access_token},
+                files={"thumb": ("thumbnail", thumb_data, content_type)},
+            )
+            if resp.status_code == 200 and resp.json().get("success"):
+                logger.info(f"FB thumbnail uploaded for video {video_id}")
+                return True
+            else:
+                logger.warning(f"FB thumbnail upload returned {resp.status_code}: {resp.text[:200]}")
+                return False
+    except Exception as e:
+        logger.warning(f"FB thumbnail upload error for {video_id}: {e}")
+        return False
+
+
+# ── Film Publishing ────────────────────────────────────────────────
+
+def publish_film_to_facebook(access_token: str, page_id: str, video_path: str,
+                              description: str, subtitle_path: str = None,
+                              thumbnail_path: str = None) -> dict:
+    """Publish a long video to Facebook Page, optionally with thumbnail and SRT subtitles."""
+    result = publish_to_facebook(access_token, page_id, video_path, description)
+    if not result.get("success"):
+        return result
+
+    video_id = result.get("video_id")
+    if not video_id or video_id == "pending":
+        return result
+
+    # Get page token once for post-upload operations
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(f"{GRAPH_API_BASE}/{page_id}", params={
+                "access_token": access_token, "fields": "access_token",
+            })
+            page_token = resp.json().get("access_token", access_token)
+    except Exception as e:
+        logger.warning(f"FB page token fetch failed: {e}")
+        page_token = access_token
+
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        upload_facebook_thumbnail(page_token, video_id, thumbnail_path)
+
+    if subtitle_path and os.path.exists(subtitle_path):
+        upload_facebook_captions(page_token, video_id, subtitle_path)
+
+    return result
+
+
+def publish_film_to_youtube(client_id: str, client_secret: str, refresh_token: str,
+                             video_path: str, title: str, description: str,
+                             tags: list = None, category: str = "22",
+                             privacy: str = "public",
+                             thumbnail_path: str = None,
+                             subtitle_path: str = None) -> dict:
+    """Publish a long video to YouTube with optional thumbnail and Polish SRT subtitles."""
+    # Upload video without subtitles first (we'll upload Polish subtitles separately)
+    result = publish_to_youtube(
+        client_id, client_secret, refresh_token,
+        video_path, title, description,
+        tags=tags, category=category, privacy=privacy,
+        is_short=False, subtitle_path=None
+    )
+    if not result.get("success"):
+        return result
+
+    video_id = result["video_id"]
+    access_token = _get_yt_access_token(client_id, client_secret, refresh_token)
+
+    # Upload thumbnail
+    if access_token and thumbnail_path and os.path.exists(thumbnail_path):
+        upload_youtube_thumbnail(access_token, video_id, thumbnail_path)
+
+    # Upload Polish subtitles
+    if access_token and subtitle_path and os.path.exists(subtitle_path):
+        try:
+            result["subtitles"] = upload_youtube_subtitles(
+                access_token, video_id, subtitle_path, language="pl", name="Polski"
+            )
+        except Exception as e:
+            logger.warning(f"Polish subtitle upload failed: {e}")
+
+    return result
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 def publish_video(account: dict, video: dict, video_path: str) -> dict:
@@ -518,10 +864,43 @@ def publish_video(account: dict, video: dict, video_path: str) -> dict:
         # Publish to Facebook (direct file upload via curl)
         if do_fb:
             fb_caption = video.get("fb_title") or caption
-            fb_result = publish_to_facebook(
-                account["fb_access_token"], account["fb_page_id"], video_path, fb_caption
+
+            # Optional SRT: explicit subtitle_file field, or any .srt in the same directory
+            fb_srt_path = None
+            if video.get("subtitle_file"):
+                candidate = os.path.join(os.path.dirname(video_path), video["subtitle_file"])
+                if os.path.exists(candidate):
+                    fb_srt_path = candidate
+            else:
+                video_dir = os.path.dirname(video_path)
+                srts = [f for f in os.listdir(video_dir) if f.lower().endswith(".srt")]
+                if srts:
+                    fb_srt_path = os.path.join(video_dir, srts[0])
+
+            # Optional thumbnail: auto-detect same-basename .jpg/.png
+            fb_thumb_path = None
+            for ext in (".jpg", ".jpeg", ".png"):
+                candidate = video_path.rsplit(".", 1)[0] + ext
+                if os.path.exists(candidate):
+                    fb_thumb_path = candidate
+                    break
+
+            fb_result = publish_film_to_facebook(
+                account["fb_access_token"], account["fb_page_id"], video_path, fb_caption,
+                subtitle_path=fb_srt_path, thumbnail_path=fb_thumb_path,
             )
             results["facebook"] = fb_result
+
+            # Post follow-up comment linking to the source long film, if configured
+            comment_text = (video.get("fb_comment_text") or "").strip()
+            fb_video_id = fb_result.get("video_id")
+            if (fb_result.get("success") and comment_text
+                    and fb_video_id and fb_video_id != "pending"):
+                comment_res = post_fb_video_comment(
+                    account["fb_access_token"], account["fb_page_id"],
+                    fb_video_id, comment_text,
+                )
+                results["facebook_comment"] = comment_res
 
     elif account["type"] == "youtube":
         is_short = video.get("video_type") == "short"
@@ -549,6 +928,16 @@ def publish_video(account: dict, video: dict, video_path: str) -> dict:
             subtitle_path=subtitle_path,
         )
         results["youtube"] = yt_result
+
+        # Post follow-up comment linking to the source long film, if configured
+        yt_comment = (video.get("yt_comment_text") or "").strip()
+        yt_video_id = yt_result.get("video_id")
+        if yt_result.get("success") and yt_comment and yt_video_id:
+            comment_res = post_yt_video_comment(
+                account["yt_client_id"], account["yt_client_secret"],
+                account["yt_refresh_token"], yt_video_id, yt_comment,
+            )
+            results["youtube_comment"] = comment_res
 
     return results
 

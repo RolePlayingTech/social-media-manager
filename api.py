@@ -65,6 +65,8 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 API_TOKEN = os.environ["SMM_API_TOKEN"]
 DASHBOARD_PASSWORD = os.environ["SMM_PASSWORD"]
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+MAX_FILM_UPLOAD_SIZE = 5 * 1024 * 1024 * 1024  # 5GB for films
+FILMS_DIR = os.path.join(UPLOAD_DIR, "films")
 CORS_ORIGINS = os.environ.get("SMM_CORS_ORIGINS", "http://localhost:3000").split(",")
 TIMEZONE = os.environ.get("SMM_TIMEZONE", "Europe/Warsaw")
 
@@ -79,6 +81,7 @@ async def lifespan(app):
     db.init_db()
     seed_accounts()
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(FILMS_DIR, exist_ok=True)
     # Recover videos stuck in "publishing" after crash/restart
     with db.get_db() as conn:
         stuck = conn.execute("UPDATE videos SET status = 'queued' WHERE status = 'publishing'").rowcount
@@ -180,6 +183,10 @@ class ScheduleUpdate(BaseModel):
     publish_times: list[str] = ["09:00", "18:00"]
     max_per_day: int = 2
     enabled: bool = True
+    story_enabled: bool = False
+    story_times: list[str] = ["09:00"]
+    story_source: str = "archive"
+    story_queue_skip: int = 5
 
 class VideoUpdate(BaseModel):
     title: Optional[str] = None
@@ -194,6 +201,9 @@ class VideoUpdate(BaseModel):
     target_fb: Optional[bool] = None
     fb_title: Optional[str] = None
     is_trial: Optional[bool] = None
+    source_film_id: Optional[int] = None
+    fb_comment_text: Optional[str] = None
+    yt_comment_text: Optional[str] = None
 
 class ReorderRequest(BaseModel):
     video_ids: list[int]
@@ -490,6 +500,11 @@ async def upload_video(
     if not file.filename.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
         raise HTTPException(400, "Invalid video format. Supported: mp4, mov, avi, mkv, webm")
 
+    # Duplicate check: same original_filename already queued for this account
+    existing = db.find_queued_by_original_filename(account_id, file.filename)
+    if existing:
+        raise HTTPException(409, f"Duplicate: '{file.filename}' is already in the queue (id={existing['id']})")
+
     # Sanitize filename
     safe_name = "".join(c for c in file.filename if c.isalnum() or c in "._-").strip()
     if not safe_name:
@@ -596,6 +611,11 @@ async def bulk_upload(
     for file in video_files:
         if not file.filename.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
             results.append({"filename": file.filename, "error": "Invalid format"})
+            continue
+
+        existing = db.find_queued_by_original_filename(account_id, file.filename)
+        if existing:
+            results.append({"filename": file.filename, "ok": False, "error": f"Duplikat: już w kolejce (id={existing['id']})"})
             continue
 
         safe_name = "".join(c for c in file.filename if c.isalnum() or c in "._-").strip()
@@ -1231,6 +1251,437 @@ async def global_stats():
 @app.get("/api/logs", dependencies=[Depends(verify_token)])
 async def get_logs(account_id: Optional[int] = None, limit: int = 50):
     return db.get_publish_logs(account_id=account_id, limit=limit)
+
+
+# ── Films ─────────────────────────────────────────────────────────────
+
+class FilmUpdate(BaseModel):
+    title: Optional[str] = None
+    fb_description: Optional[str] = None
+    yt_description: Optional[str] = None
+    yt_tags: Optional[list[str]] = None
+    yt_category: Optional[str] = None
+    yt_privacy: Optional[str] = None
+    fb_account_id: Optional[int] = None
+    fb_publish_date: Optional[str] = None
+    fb_status: Optional[str] = None
+    yt_account_id: Optional[int] = None
+    yt_publish_date: Optional[str] = None
+    yt_status: Optional[str] = None
+    topic_prefixes: Optional[str] = None
+    fb_comment_template: Optional[str] = None
+
+
+class FilmScheduleUpdate(BaseModel):
+    fb_account_id: Optional[int] = None
+    fb_publish_time: str = "12:00"
+    fb_day_of_week: str = "*"
+    fb_enabled: bool = False
+    fb_start_date: Optional[str] = None
+    yt_account_id: Optional[int] = None
+    yt_publish_time: str = "18:00"
+    yt_day_of_week: str = "*"
+    yt_enabled: bool = False
+    yt_start_date: Optional[str] = None
+
+
+@app.get("/api/films/schedule", dependencies=[Depends(verify_token)])
+async def get_film_schedule():
+    schedule = db.get_film_schedule()
+    if not schedule:
+        return {
+            "fb_account_id": None, "fb_publish_time": "12:00",
+            "fb_day_of_week": "*", "fb_enabled": False, "fb_start_date": None,
+            "yt_account_id": None, "yt_publish_time": "18:00",
+            "yt_day_of_week": "*", "yt_enabled": False, "yt_start_date": None,
+        }
+    return schedule
+
+
+@app.put("/api/films/schedule", dependencies=[Depends(verify_token)])
+async def update_film_schedule(data: FilmScheduleUpdate):
+    return db.update_film_schedule(data.model_dump())
+
+
+class FilmScheduleFBUpdate(BaseModel):
+    publish_time: str = "12:00"
+    day_of_week: str = "*"
+    enabled: bool = False
+    start_date: Optional[str] = None
+
+
+@app.get("/api/films/schedule/fb", dependencies=[Depends(verify_token)])
+async def get_film_schedules_fb():
+    schedules = db.get_film_schedules_fb()
+    accs = {a["id"]: a["name"] for a in db.get_accounts() if a["type"] == "instagram_facebook"}
+    return [{"account_name": accs.get(s["account_id"], ""), **s} for s in schedules]
+
+
+@app.put("/api/films/schedule/fb/{account_id}", dependencies=[Depends(verify_token)])
+async def update_film_schedule_fb(account_id: int, data: FilmScheduleFBUpdate):
+    # Verify account exists and is instagram_facebook type
+    acc = db.get_account(account_id)
+    if not acc or acc["type"] != "instagram_facebook":
+        raise HTTPException(404, "FB account not found")
+    return db.update_film_schedule_fb(account_id, data.model_dump())
+
+
+@app.get("/api/films/stats", dependencies=[Depends(verify_token)])
+async def film_stats():
+    return db.get_film_stats()
+
+
+@app.get("/api/films/for-select", dependencies=[Depends(verify_token)])
+async def films_for_select():
+    """Lightweight list of films for use in dropdowns."""
+    films = db.get_films()
+    return [{
+        "id": f["id"],
+        "title": f.get("title") or f.get("video_filename") or f"Film {f['id']}",
+        "fb_permalink": f.get("fb_permalink") or "",
+        "fb_status": f.get("fb_status"),
+        "topic_prefixes": f.get("topic_prefixes") or "",
+    } for f in films]
+
+
+@app.get("/api/films", dependencies=[Depends(verify_token)])
+async def list_films(status: Optional[str] = None, fb_account_id: Optional[int] = None):
+    films = db.get_films(status=status, fb_account_id=fb_account_id)
+    accs = {a["id"]: a["name"] for a in db.get_accounts()}
+    for f in films:
+        f["fb_account_name"] = accs.get(f.get("fb_account_id"), "")
+        f["yt_account_name"] = accs.get(f.get("yt_account_id"), "")
+        f["ready_fb"] = db.film_is_ready_fb(f)
+        f["ready_yt"] = db.film_is_ready_yt(f)
+    return films
+
+
+@app.post("/api/films/upload", dependencies=[Depends(verify_token)])
+async def upload_film(
+    video: UploadFile = File(...),
+    thumbnail: Optional[UploadFile] = File(None),
+    subtitle: Optional[UploadFile] = File(None),
+    title: str = Form(""),
+    fb_description: str = Form(""),
+    yt_description: str = Form(""),
+    yt_tags: str = Form(""),
+    yt_category: str = Form("22"),
+    yt_privacy: str = Form("public"),
+    fb_account_id: Optional[int] = Form(None),
+    fb_publish_date: Optional[str] = Form(None),
+    yt_account_id: Optional[int] = Form(None),
+    yt_publish_date: Optional[str] = Form(None),
+):
+    """Upload a film with optional thumbnail and SRT subtitles."""
+    # Validate video format
+    ext = os.path.splitext(video.filename)[1].lower()
+    if ext not in (".mp4", ".mov", ".avi", ".mkv", ".webm"):
+        raise HTTPException(400, "Invalid video format")
+
+    # Create film record first to get ID
+    tags_list = [t.strip() for t in yt_tags.split(",") if t.strip()] if yt_tags else []
+    film_data = {
+        "video_filename": "",  # placeholder
+        "original_filename": video.filename,
+        "title": title or os.path.splitext(video.filename)[0],
+        "fb_description": fb_description,
+        "yt_description": yt_description,
+        "yt_tags": tags_list,
+        "yt_category": yt_category,
+        "yt_privacy": yt_privacy,
+        "fb_account_id": fb_account_id if fb_account_id and fb_account_id > 0 else None,
+        "fb_publish_date": fb_publish_date if fb_publish_date else None,
+        "yt_account_id": yt_account_id if yt_account_id and yt_account_id > 0 else None,
+        "yt_publish_date": yt_publish_date if yt_publish_date else None,
+    }
+    film = db.add_film(film_data)
+    film_id = film["id"]
+    film_dir = os.path.join(FILMS_DIR, str(film_id))
+    os.makedirs(film_dir, exist_ok=True)
+
+    # Save video file
+    video_filename = f"video{ext}"
+    video_path = os.path.join(film_dir, video_filename)
+    content = await video.read()
+    with open(video_path, "wb") as f:
+        f.write(content)
+
+    update = {
+        "video_filename": video_filename,
+        "file_size": len(content),
+    }
+
+    # Detect duration
+    try:
+        import subprocess
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            update["duration"] = float(probe.stdout.strip())
+    except Exception:
+        pass
+
+    # Save thumbnail
+    if thumbnail and thumbnail.filename:
+        thumb_ext = os.path.splitext(thumbnail.filename)[1].lower()
+        if thumb_ext in (".jpg", ".jpeg", ".png", ".webp"):
+            thumb_filename = f"thumbnail{thumb_ext}"
+            thumb_path = os.path.join(film_dir, thumb_filename)
+            thumb_content = await thumbnail.read()
+            with open(thumb_path, "wb") as f:
+                f.write(thumb_content)
+            update["thumbnail_filename"] = thumb_filename
+
+    # Save subtitle
+    if subtitle and subtitle.filename:
+        sub_ext = os.path.splitext(subtitle.filename)[1].lower()
+        if sub_ext in (".srt", ".vtt"):
+            sub_filename = f"subtitles{sub_ext}"
+            sub_path = os.path.join(film_dir, sub_filename)
+            sub_content = await subtitle.read()
+            with open(sub_path, "wb") as f:
+                f.write(sub_content)
+            update["subtitle_filename"] = sub_filename
+
+    # For YT: if no account provided, try to get from global YT schedule
+    if not update.get("yt_account_id") and not film_data.get("yt_account_id") and not film_data.get("yt_publish_date"):
+        _, yt_acct = db.get_next_film_slot("yt")
+        if yt_acct:
+            update["yt_account_id"] = yt_acct
+
+    film = db.update_film(film_id, update)
+
+    # Auto-assign schedule slots if film is complete
+    film = db.auto_assign_film_slots(film_id)
+    return film
+
+
+@app.get("/api/films/{film_id}", dependencies=[Depends(verify_token)])
+async def get_film(film_id: int):
+    film = db.get_film(film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    accs = {a["id"]: a["name"] for a in db.get_accounts()}
+    film["fb_account_name"] = accs.get(film.get("fb_account_id"), "")
+    film["yt_account_name"] = accs.get(film.get("yt_account_id"), "")
+    return film
+
+
+@app.put("/api/films/{film_id}", dependencies=[Depends(verify_token)])
+async def update_film(film_id: int, data: FilmUpdate):
+    film = db.get_film(film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    # Auto-set status to scheduled if date+account provided
+    if "fb_publish_date" in update_data and update_data["fb_publish_date"]:
+        fb_acc = update_data.get("fb_account_id", film.get("fb_account_id"))
+        if fb_acc and film.get("fb_status") in ("draft", "failed"):
+            update_data["fb_status"] = "scheduled"
+    if "yt_publish_date" in update_data and update_data["yt_publish_date"]:
+        yt_acc = update_data.get("yt_account_id", film.get("yt_account_id"))
+        if yt_acc and film.get("yt_status") in ("draft", "failed"):
+            update_data["yt_status"] = "scheduled"
+    result = db.update_film(film_id, update_data)
+    # Auto-assign schedule slots if film became complete
+    result = db.auto_assign_film_slots(film_id)
+    return result
+
+
+@app.delete("/api/films/{film_id}", dependencies=[Depends(verify_token)])
+async def delete_film(film_id: int):
+    film = db.get_film(film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    # Delete files
+    film_dir = os.path.join(FILMS_DIR, str(film_id))
+    if os.path.exists(film_dir):
+        shutil.rmtree(film_dir)
+    db.delete_film(film_id)
+    return {"ok": True}
+
+
+@app.post("/api/films/{film_id}/publish/{platform}", dependencies=[Depends(verify_token)])
+async def publish_film_now(film_id: int, platform: str):
+    """Trigger immediate publish of a film to a platform."""
+    if platform not in ("fb", "yt"):
+        raise HTTPException(400, "Platform must be 'fb' or 'yt'")
+    film = db.get_film(film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    account_id = film.get(f"{platform}_account_id")
+    if not account_id:
+        raise HTTPException(400, f"No {platform} account assigned")
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(400, "Account not found")
+
+    # Mark scheduled so the scheduler picks it up immediately
+    db.update_film(film_id, {
+        f"{platform}_status": "scheduled",
+        f"{platform}_publish_date": datetime.now().isoformat(),
+    })
+    return {"ok": True, "message": f"Film queued for immediate {platform} publish"}
+
+
+# ── Reel ↔ Film linking + AI comment generation ────────────────────
+
+@app.get("/api/films/{film_id}/linked-reels", dependencies=[Depends(verify_token)])
+async def list_linked_reels(film_id: int):
+    return db.get_videos_linked_to_film(film_id)
+
+
+@app.post("/api/films/{film_id}/auto-link-reels", dependencies=[Depends(verify_token)])
+async def auto_link_reels(film_id: int):
+    """Link all queued reels matching the film's topic_prefixes (only unlinked ones)."""
+    film = db.get_film(film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    if not (film.get("topic_prefixes") or "").strip():
+        raise HTTPException(400, "Film has no topic_prefixes set")
+    count = db.link_queued_reels_to_film(film_id, only_unlinked=True)
+    return {"ok": True, "linked": count}
+
+
+@app.post("/api/films/{film_id}/generate-comments", dependencies=[Depends(verify_token)])
+async def generate_film_comments_bulk(film_id: int, regenerate: bool = False):
+    """For all queued reels linked to this film, generate AI FB comments."""
+    import ai_client
+    film = db.get_film(film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    if not (film.get("fb_permalink") or "").strip():
+        raise HTTPException(400, "Film has no fb_permalink yet — publish to FB first or set it manually")
+
+    ai = db.get_ai_settings()
+    if not ai:
+        raise HTTPException(400, "AI provider not configured")
+
+    reels = [v for v in db.get_videos_linked_to_film(film_id) if v.get("status") == "queued"]
+    generated, skipped, failed = 0, 0, []
+    for v in reels:
+        if not regenerate and (v.get("fb_comment_text") or "").strip():
+            skipped += 1
+            continue
+        try:
+            text = ai_client.generate_film_comment(
+                provider=ai["provider"], api_key=ai["api_key"], model=ai["model_name"],
+                reel_title=v.get("title") or "",
+                reel_caption=v.get("caption") or "",
+                film_title=film.get("title") or "",
+                film_description=film.get("fb_description") or "",
+                film_url=film.get("fb_permalink") or "",
+                custom_template=film.get("fb_comment_template") or "",
+            )
+            db.update_video(v["id"], {"fb_comment_text": text})
+            generated += 1
+        except Exception as e:
+            failed.append({"video_id": v["id"], "error": str(e)})
+    return {"ok": True, "generated": generated, "skipped": skipped, "failed": failed,
+            "total_linked": len(reels)}
+
+
+@app.post("/api/videos/{video_id}/generate-film-comment", dependencies=[Depends(verify_token)])
+async def generate_film_comment_one(video_id: int):
+    """Generate an AI FB comment for a single reel (must have source_film_id set)."""
+    import ai_client
+    video = db.get_video(video_id)
+    if not video:
+        raise HTTPException(404, "Video not found")
+    if not video.get("source_film_id"):
+        raise HTTPException(400, "Video has no source_film_id set")
+    film = db.get_film(video["source_film_id"])
+    if not film:
+        raise HTTPException(400, "Source film not found")
+    if not (film.get("fb_permalink") or "").strip():
+        raise HTTPException(400, "Source film has no fb_permalink yet")
+
+    ai = db.get_ai_settings()
+    if not ai:
+        raise HTTPException(400, "AI provider not configured")
+
+    text = ai_client.generate_film_comment(
+        provider=ai["provider"], api_key=ai["api_key"], model=ai["model_name"],
+        reel_title=video.get("title") or "",
+        reel_caption=video.get("caption") or "",
+        film_title=film.get("title") or "",
+        film_description=film.get("fb_description") or "",
+        film_url=film.get("fb_permalink") or "",
+        custom_template=film.get("fb_comment_template") or "",
+    )
+    db.update_video(video_id, {"fb_comment_text": text})
+    return {"ok": True, "fb_comment_text": text}
+
+
+
+
+@app.post("/api/films/{film_id}/upload-file", dependencies=[Depends(verify_token)])
+async def upload_film_file(
+    film_id: int,
+    thumbnail: Optional[UploadFile] = File(None),
+    subtitle: Optional[UploadFile] = File(None),
+):
+    """Upload or replace thumbnail/subtitle for an existing film."""
+    film = db.get_film(film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    film_dir = os.path.join(FILMS_DIR, str(film_id))
+    os.makedirs(film_dir, exist_ok=True)
+    update = {}
+
+    if thumbnail and thumbnail.filename:
+        thumb_ext = os.path.splitext(thumbnail.filename)[1].lower()
+        if thumb_ext in (".jpg", ".jpeg", ".png", ".webp"):
+            thumb_filename = f"thumbnail{thumb_ext}"
+            content = await thumbnail.read()
+            with open(os.path.join(film_dir, thumb_filename), "wb") as f:
+                f.write(content)
+            update["thumbnail_filename"] = thumb_filename
+
+    if subtitle and subtitle.filename:
+        sub_ext = os.path.splitext(subtitle.filename)[1].lower()
+        if sub_ext in (".srt", ".vtt"):
+            sub_filename = f"subtitles{sub_ext}"
+            content = await subtitle.read()
+            with open(os.path.join(film_dir, sub_filename), "wb") as f:
+                f.write(content)
+            update["subtitle_filename"] = sub_filename
+
+    if update:
+        return db.update_film(film_id, update)
+    return film
+
+
+@app.get("/api/film-file/{film_id}/{filename}")
+async def serve_film_file(film_id: int, filename: str, request: Request):
+    """Serve film files (video, thumbnail, srt)."""
+    token = request.query_params.get("token", "")
+    auth = request.headers.get("Authorization", "")
+    auth_token = auth[7:] if auth.startswith("Bearer ") else ""
+    if not (secrets.compare_digest(token, API_TOKEN) if token else False) and \
+       not (secrets.compare_digest(auth_token, API_TOKEN) if auth_token else False):
+        raise HTTPException(401, "Unauthorized")
+
+    safe_filename = os.path.basename(filename)
+    file_path = os.path.join(FILMS_DIR, str(film_id), safe_filename)
+    real_path = os.path.realpath(file_path)
+    if not real_path.startswith(os.path.realpath(FILMS_DIR)):
+        raise HTTPException(400, "Invalid path")
+    if not os.path.exists(real_path):
+        raise HTTPException(404, "File not found")
+
+    # Determine content type
+    ext = os.path.splitext(safe_filename)[1].lower()
+    media_types = {
+        ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
+        ".mkv": "video/x-matroska", ".webm": "video/webm",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+        ".srt": "application/x-subrip", ".vtt": "text/vtt",
+    }
+    return FileResponse(real_path, media_type=media_types.get(ext, "application/octet-stream"))
 
 
 # ── Video Streaming ──────────────────────────────────────────────────

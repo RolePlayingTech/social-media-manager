@@ -699,6 +699,7 @@ body {
 .platform-badge.yt { background: var(--red); color: #fff; opacity: 0.8; }
 .platform-badge.story { background: var(--yellow); color: #000; opacity: 0.8; }
 .platform-badge.trial { background: #f59e0b; color: #fff; opacity: 0.8; }
+.platform-badge.film-link { background: #6366f1; color: #fff; opacity: 0.85; }
 
 .platform-badge.clickable { cursor: pointer; transition: opacity 0.15s; }
 .platform-badge.clickable:hover { opacity: 1; }
@@ -711,6 +712,65 @@ body {
 }
 .load-more-bar .btn {
     min-width: 200px;
+}
+
+/* ── Films ── */
+.film-card {
+    display: flex;
+    gap: 16px;
+    padding: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    align-items: flex-start;
+}
+.film-thumbnail {
+    width: 200px;
+    height: 112px;
+    flex-shrink: 0;
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg-dim);
+    position: relative;
+}
+.film-duration {
+    position: absolute;
+    bottom: 4px;
+    right: 4px;
+    background: rgba(0,0,0,.75);
+    color: #fff;
+    font-size: 11px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+}
+.film-target {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+.film-targets .platform-badge {
+    font-size: 10px;
+    padding: 1px 5px;
+}
+.file-badge {
+    background: var(--bg-dim);
+    color: var(--text-dim);
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.form-row {
+    display: flex;
+    gap: 16px;
+}
+.form-row .form-group {
+    flex: 1;
 }
 
 /* ── Copy Dropdown ── */

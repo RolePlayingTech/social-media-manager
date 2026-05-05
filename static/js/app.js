@@ -7,6 +7,7 @@ let TOKEN = '';
 let accounts = [];
 let currentAccountId = null;
 let currentTab = 'queue';
+let currentView = 'account'; // 'account' or 'films'
 let publishPollTimer = null;
 const PAGE_SIZE = 30;
 
@@ -14,10 +15,10 @@ const PAGE_SIZE = 30;
 const thumbObserver = new IntersectionObserver((entries) => {
     for (const e of entries) {
         if (e.isIntersecting) {
-            const video = e.target;
-            const src = video.dataset.src;
-            if (src) { video.src = src; video.removeAttribute('data-src'); }
-            thumbObserver.unobserve(video);
+            const el = e.target;
+            const src = el.dataset.src;
+            if (src) { el.src = src; el.removeAttribute('data-src'); }
+            thumbObserver.unobserve(el);
         }
     }
 }, { rootMargin: '200px' });
@@ -175,6 +176,19 @@ function renderSidebar() {
     }
     html += '</div>';
 
+    // Films section
+    html += `<div class="sidebar-section">
+        <div class="sidebar-section-title">Filmy</div>
+        <div class="sidebar-item ${currentView === 'films' ? 'active' : ''}"
+             onclick="selectFilms()">
+            <div class="sidebar-item-icon">\u{1F3AC}</div>
+            <div class="sidebar-item-info">
+                <div class="sidebar-item-name">Filmy</div>
+                <div class="sidebar-item-meta">D\u0142ugie filmy poziome</div>
+            </div>
+        </div>
+    </div>`;
+
     document.getElementById('sidebar-accounts').innerHTML = html;
 }
 
@@ -192,6 +206,7 @@ function renderNoAccount() {
 
 async function selectAccount(id) {
     currentAccountId = id;
+    currentView = 'account';
     renderSidebar();
     const acc = accounts.find(a => a.id === id);
     if (!acc) return;
@@ -199,6 +214,13 @@ async function selectAccount(id) {
     const isYT = acc.type === 'youtube';
     await renderAccountView(acc, isYT);
     switchTab(currentTab);
+}
+
+async function selectFilms() {
+    currentView = 'films';
+    currentAccountId = null;
+    renderSidebar();
+    await renderFilmsView();
 }
 
 async function renderAccountView(acc, isYT) {
@@ -291,6 +313,7 @@ async function switchTab(tab) {
 
 let _queueVideos = [];
 let _queueShown = 0;
+let queueSort = 'position'; // 'position', 'latest'
 
 function buildQueueCard(v, i, total, isYT, acc) {
     const thumb = videoUrl(v.account_id, 'queue', v.filename);
@@ -307,15 +330,20 @@ function buildQueueCard(v, i, total, isYT, acc) {
             + `<span class="platform-badge fb clickable ${fbOn ? '' : 'off'}" onclick="togglePlatform(event, ${v.id}, 'target_fb', ${fbOn ? 'false' : 'true'})" title="Kliknij aby ${fbOn ? 'wy\u0142\u0105czy\u0107' : 'w\u0142\u0105czy\u0107'} Facebook">FB</span>`
             + (trialOn ? `<span class="platform-badge trial" title="Rolka pr\u00f3bna (Trial Reel)">T</span>` : '');
     }
-    return `<div class="video-card" draggable="true" data-id="${v.id}"
-                ondragstart="dragStart(event)" ondragover="dragOver(event)"
-                ondrop="drop(event)" ondragend="dragEnd(event)" ondragleave="dragLeave(event)">
+    const filmBadge = v.source_film_id
+        ? `<span class="platform-badge film-link" title="Powi\u0105zana z d\u0142ugim filmem (komentarz po publikacji FB)">\u{1F3AC} film${v.fb_comment_text ? ' \u2713' : ' \u2014 brak komentarza'}</span>`
+        : '';
+    const isSorted = queueSort !== 'position';
+    const displayPos = isSorted ? (v.queue_position ?? i + 1) : i + 1;
+    return `<div class="video-card" draggable="${!isSorted}" data-id="${v.id}"
+                ondragstart="${!isSorted ? 'dragStart(event)' : ''}" ondragover="${!isSorted ? 'dragOver(event)' : ''}"
+                ondrop="${!isSorted ? 'drop(event)' : ''}" ondragend="${!isSorted ? 'dragEnd(event)' : ''}" ondragleave="${!isSorted ? 'dragLeave(event)' : ''}">
         <div class="video-position">
-            <input type="number" class="pos-input" value="${i + 1}" min="1" max="${total}"
+            <input type="number" class="pos-input" value="${displayPos}" min="1" max="${total}"
                    title="Wpisz numer pozycji"
                    onkeydown="if(event.key==='Enter'){moveVideoToPos(${v.id},this.value,${total});this.blur()}"
                    onblur="moveVideoToPos(${v.id},this.value,${total})"
-                   data-orig="${i + 1}">
+                   data-orig="${displayPos}">
         </div>
         <div class="video-thumbnail">
             <video data-src="${thumb}#t=0.5" preload="none" muted
@@ -327,6 +355,7 @@ function buildQueueCard(v, i, total, isYT, acc) {
             <div class="video-meta">
                 <span class="status-badge queued">${typeLabel}</span>
                 ${platformBadges}
+                ${filmBadge}
                 <span>${size}</span>
                 ${estDate ? `<span class="est-date" title="Planowana publikacja">\u{1F4C5} ${estDate}</span>` : ''}
             </div>
@@ -335,8 +364,8 @@ function buildQueueCard(v, i, total, isYT, acc) {
             <button class="btn btn-sm" onclick="window.open('${thumb}', '_blank')" title="Otw\u00f3rz wideo">\u25b6</button>
             <button class="btn btn-sm" onclick="showEditVideoModal(${v.id})">Edytuj</button>
             <button class="btn btn-success btn-sm" onclick="publishNow(${v.id})">Publikuj</button>
-            <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'up', ${currentAccountId})" ${i === 0 ? 'disabled' : ''}>\u2191</button>
-            <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'down', ${currentAccountId})" ${i === total - 1 ? 'disabled' : ''}>\u2193</button>
+            <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'up', ${currentAccountId})" ${isSorted || i === 0 ? 'disabled' : ''}>\u2191</button>
+            <button class="btn btn-sm btn-icon" onclick="moveVideo(${v.id}, 'down', ${currentAccountId})" ${isSorted || i === total - 1 ? 'disabled' : ''}>\u2193</button>
             <button class="btn btn-sm" onclick="showCopyDropdown(event, ${v.id})" title="Kopiuj do innego konta">\u29C9</button>
             <button class="btn btn-danger btn-sm" onclick="confirmDeleteVideo(${v.id})">\u2717</button>
         </div>
@@ -385,9 +414,14 @@ async function renderQueue(container) {
             return;
         }
 
+        applyQueueSort();
         container.innerHTML = `<div class="tab-content active">
             <div class="queue-header">
                 <h3>Kolejka <span class="queue-count">(${_queueVideos.length} film\u00f3w)</span></h3>
+                <select onchange="setQueueSort(this.value)" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:4px 8px;font-size:12px;border-radius:var(--radius)">
+                    <option value="position" ${queueSort === 'position' ? 'selected' : ''}>Kolejno\u015b\u0107</option>
+                    <option value="latest" ${queueSort === 'latest' ? 'selected' : ''}>Najpó\u017aniej zaplanowane</option>
+                </select>
             </div>
             <div class="video-list" id="video-queue"></div>
         </div>`;
@@ -529,6 +563,23 @@ async function renderPublished(container) {
     } catch (e) {
         container.innerHTML = `<div class="tab-content active"><p style="color:var(--red)">B\u0142\u0105d: ${e.message}</p></div>`;
     }
+}
+
+function applyQueueSort() {
+    if (queueSort === 'latest') {
+        _queueVideos.sort((a, b) => {
+            const da = new Date(a.estimated_publish_at || 0);
+            const db2 = new Date(b.estimated_publish_at || 0);
+            return db2 - da;
+        });
+    } else {
+        _queueVideos.sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0));
+    }
+}
+
+function setQueueSort(s) {
+    queueSort = s;
+    switchTab('queue');
 }
 
 function setPublishedFilter(f) {
@@ -712,7 +763,9 @@ async function doUpload() {
 
     try {
         const result = await api('POST', `/accounts/${currentAccountId}/videos/bulk-upload`, formData, true);
-        toast(`Wgrano ${result.uploaded} plik\u00f3w`, 'success');
+        const dupes = (result.results || []).filter(r => !r.ok && r.error && r.error.startsWith('Duplikat'));
+        if (dupes.length > 0) toast(`Pominięto ${dupes.length} duplikatów: ${dupes.map(d => d.filename).join(', ')}`, 'error');
+        if (result.uploaded > 0) toast(`Wgrano ${result.uploaded} plik\u00f3w`, 'success');
 
         // Update uploaded videos with metadata
         const uploadedIds = result.results.filter(r => r.ok).map(r => r.id);
@@ -846,10 +899,6 @@ async function renderSchedule(container) {
                             <input type="checkbox" id="sched-fb" ${acc.publish_to_fb ? 'checked' : ''}>
                             Facebook
                         </label>
-                        <label class="platform-toggle">
-                            <input type="checkbox" id="sched-stories" ${acc.publish_to_stories ? 'checked' : ''}>
-                            Relacje
-                        </label>
                     </div>
                 </div>
                 <div class="schedule-field" style="margin-top:12px">
@@ -861,6 +910,57 @@ async function renderSchedule(container) {
                         </label>
                     </div>
                     <div class="schedule-hint">Rolki pr\u00f3bne s\u0105 najpierw pokazywane tylko nieobserwuj\u0105cym. Je\u015bli dobrze performuj\u0105, trafiaj\u0105 do obserwuj\u0105cych.</div>
+                </div>
+            </div>`;
+
+            const storyEnabled = !!schedule.story_enabled;
+            const storyTimes = (schedule.story_times || ['09:00']).slice().sort();
+            const storySource = schedule.story_source || 'archive';
+            const storySkip = schedule.story_queue_skip ?? 5;
+            html += `<div class="schedule-section" style="margin-bottom:16px;border-top:1px solid var(--border);padding-top:16px">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                    <span style="font-weight:600;font-size:13px">Auto-relacje (Instagram)</span>
+                    <label class="platform-toggle">
+                        <input type="checkbox" id="story-enabled" ${storyEnabled ? 'checked' : ''}
+                            onchange="toggleStoryConfig(this.checked)">
+                        W\u0142\u0105cz
+                    </label>
+                </div>
+                <div id="story-config" style="display:${storyEnabled ? 'block' : 'none'}">
+                    <div class="schedule-hint" style="margin-bottom:10px">
+                        Ka\u017cda godzina = 1 relacja dziennie na Instagramie z losowego filmu.
+                        Na Facebooku mo\u017cesz r\u0119cznie klikn\u0105\u0107 \u201eUdost\u0119pnij w relacji\u201d pod opublikowan\u0105 relacj\u0105 IG.
+                    </div>
+                    <div class="schedule-section" style="margin-bottom:12px">
+                        <label class="schedule-section-label">Godziny relacji</label>
+                        <div id="story-times-list">
+                            ${storyTimes.map((t) => {
+                                const [h, m] = t.split(':');
+                                return `<div class="time-slot">
+                                    <select class="story-hour">${buildHourOptions(h)}</select>
+                                    <span class="time-sep">:</span>
+                                    <select class="story-minute">${buildMinuteOptions(m)}</select>
+                                    <button type="button" class="btn-remove-time" onclick="removeStorySlot(this)" title="Usu\u0144">\u00d7</button>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <button type="button" class="btn btn-sm" onclick="addStorySlot()" style="margin-top:8px">+ Dodaj godzin\u0119</button>
+                    </div>
+                    <div class="schedule-row">
+                        <div class="schedule-field">
+                            <label>\u0179r\u00f3d\u0142o film\u00f3w</label>
+                            <select id="story-source" onchange="toggleStorySkip(this.value)">
+                                <option value="archive" ${storySource === 'archive' ? 'selected' : ''}>Archiwum (ju\u017c opublikowane)</option>
+                                <option value="queue_skip" ${storySource === 'queue_skip' ? 'selected' : ''}>Kolejka (pomij pierwszych N)</option>
+                            </select>
+                            <div class="schedule-hint">Archiwum \u2014 bezpieczne, nie spoileruje nadchodz\u0105cych post\u00f3w.</div>
+                        </div>
+                        <div class="schedule-field" id="story-skip-field" style="display:${storySource === 'queue_skip' ? 'block' : 'none'}">
+                            <label>Pomij pierwszych N z kolejki</label>
+                            <input type="number" id="story-queue-skip" value="${storySkip}" min="1" max="50" style="width:80px">
+                            <div class="schedule-hint">Np. 5 = pierwsze 5 film\u00f3w w kolejce jest chronione.</div>
+                        </div>
+                    </div>
                 </div>
             </div>`;
         }
@@ -917,8 +1017,43 @@ function removeTimeSlot(btn) {
     updateSchedSummary();
 }
 
+function toggleStoryConfig(enabled) {
+    const el = document.getElementById('story-config');
+    if (el) el.style.display = enabled ? 'block' : 'none';
+}
+
+function toggleStorySkip(val) {
+    const el = document.getElementById('story-skip-field');
+    if (el) el.style.display = val === 'queue_skip' ? 'block' : 'none';
+}
+
+function addStorySlot() {
+    const list = document.getElementById('story-times-list');
+    const div = document.createElement('div');
+    div.className = 'time-slot';
+    div.innerHTML = `
+        <select class="story-hour">${buildHourOptions('09')}</select>
+        <span class="time-sep">:</span>
+        <select class="story-minute">${buildMinuteOptions('00')}</select>
+        <button type="button" class="btn-remove-time" onclick="removeStorySlot(this)" title="Usu\u0144">\u00d7</button>
+    `;
+    list.appendChild(div);
+}
+
+function removeStorySlot(btn) {
+    btn.closest('.time-slot').remove();
+}
+
+function getStoryTimes() {
+    return Array.from(document.querySelectorAll('#story-times-list .time-slot')).map(slot => {
+        const h = slot.querySelector('.story-hour').value;
+        const m = slot.querySelector('.story-minute').value;
+        return `${h}:${m}`;
+    }).sort();
+}
+
 function getScheduleTimes() {
-    return Array.from(document.querySelectorAll('.time-slot')).map(slot => {
+    return Array.from(document.querySelectorAll('#sched-times-list .time-slot')).map(slot => {
         const h = slot.querySelector('.time-hour').value;
         const m = slot.querySelector('.time-minute').value;
         return `${h}:${m}`;
@@ -955,20 +1090,28 @@ async function saveSchedule() {
     }
 
     try {
-        await api('PUT', `/accounts/${currentAccountId}/schedule`, {
+        const acc = accounts.find(a => a.id === currentAccountId);
+        const schedPayload = {
             day_of_week: activeDays.length === 7 ? '*' : activeDays.join(','),
             publish_times: times,
             max_per_day: times.length,
             enabled: enabled,
-        });
+        };
+
+        if (acc?.type === 'instagram_facebook') {
+            schedPayload.story_enabled = document.getElementById('story-enabled')?.checked ?? false;
+            schedPayload.story_times = getStoryTimes();
+            schedPayload.story_source = document.getElementById('story-source')?.value ?? 'archive';
+            schedPayload.story_queue_skip = parseInt(document.getElementById('story-queue-skip')?.value ?? '5', 10);
+        }
+
+        await api('PUT', `/accounts/${currentAccountId}/schedule`, schedPayload);
 
         // Save platform toggles
-        const acc = accounts.find(a => a.id === currentAccountId);
         if (acc?.type === 'instagram_facebook') {
             await api('PUT', `/accounts/${currentAccountId}`, {
                 publish_to_ig: document.getElementById('sched-ig')?.checked ?? true,
                 publish_to_fb: document.getElementById('sched-fb')?.checked ?? true,
-                publish_to_stories: document.getElementById('sched-stories')?.checked ?? false,
                 ig_trial_reels: document.getElementById('sched-trial')?.checked ?? false,
             });
         }
@@ -1807,6 +1950,32 @@ async function showEditVideoModal(videoId) {
             </div>`;
         }
 
+        // Source film + FB comment (only meaningful for IG+FB reels — comment is posted on FB)
+        if (!isYT) {
+            let filmsForSelect = [];
+            try { filmsForSelect = await api('GET', '/films/for-select'); } catch {}
+            const filmOptions = ['<option value="">-- nie powi\u0105zany z d\u0142ugim filmem --</option>']
+                .concat(filmsForSelect.map(f =>
+                    `<option value="${f.id}" ${f.id === video.source_film_id ? 'selected' : ''}>${esc(f.title)}${f.fb_permalink ? ' [FB \u2713]' : ' [brak FB linku]'}</option>`
+                )).join('');
+            body += `<hr style="margin:16px 0;border-color:var(--border)">
+            <div class="form-group">
+                <label>\u{1F3AC} Powi\u0105zany d\u0142ugi film (komentarz pod rolk\u0105 na FB)</label>
+                <select id="edit-source-film">${filmOptions}</select>
+                <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
+                    Po opublikowaniu rolki na FB system doda komentarz z linkiem do pe\u0142nego filmu.
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Komentarz pod rolk\u0105 na FB
+                    <button class="btn btn-sm" type="button" onclick="generateFilmCommentForEdit(${videoId})" style="margin-left:8px">\u2728 Generuj AI</button>
+                </label>
+                <textarea id="edit-fb-comment" rows="3" placeholder="Komentarz, kt\u00f3ry pojawi si\u0119 pod rolk\u0105 na FB. Pusty = nie b\u0119dzie komentarza.">${esc(video.fb_comment_text || '')}</textarea>
+                ${video.fb_comment_posted ? '<div style="color:var(--green);font-size:11px;margin-top:4px">\u2713 Komentarz ju\u017c opublikowany</div>' : ''}
+                ${video.fb_comment_error ? `<div style="color:var(--red);font-size:11px;margin-top:4px">B\u0142\u0105d publikacji komentarza: ${esc(video.fb_comment_error)}</div>` : ''}
+            </div>`;
+        }
+
         body += `<div class="form-group">
             <label>Plik</label>
             <div style="font-family:var(--font-mono);font-size:12px;color:var(--text-dim)">${esc(video.filename)} \u2022 ${fmtSize(video.file_size || 0)}</div>
@@ -1864,11 +2033,36 @@ async function saveVideoEdit(videoId) {
     const isTrial = document.getElementById('edit-is-trial');
     if (isTrial) data.is_trial = isTrial.checked;
 
+    const sourceFilm = document.getElementById('edit-source-film');
+    if (sourceFilm) data.source_film_id = sourceFilm.value ? parseInt(sourceFilm.value) : null;
+    const fbComment = document.getElementById('edit-fb-comment');
+    if (fbComment) data.fb_comment_text = fbComment.value;
+
     try {
         await api('PUT', `/videos/${videoId}`, data);
         closeModal();
         toast('Film zaktualizowany', 'success');
         switchTab(currentTab);
+    } catch (e) {
+        toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}
+
+async function generateFilmCommentForEdit(videoId) {
+    const sourceFilm = document.getElementById('edit-source-film');
+    const fbComment = document.getElementById('edit-fb-comment');
+    if (!sourceFilm || !fbComment) return;
+    if (!sourceFilm.value) {
+        toast('Najpierw wybierz powi\u0105zany d\u0142ugi film', 'error');
+        return;
+    }
+    // Persist the source film selection first so the API has it
+    try {
+        await api('PUT', `/videos/${videoId}`, { source_film_id: parseInt(sourceFilm.value) });
+        toast('Generuj\u0119 komentarz...', 'info');
+        const res = await api('POST', `/videos/${videoId}/generate-film-comment`);
+        fbComment.value = res.fb_comment_text || '';
+        toast('Komentarz wygenerowany', 'success');
     } catch (e) {
         toast('B\u0142\u0105d: ' + e.message, 'error');
     }
@@ -2088,3 +2282,635 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') doLogin();
     });
 });
+
+
+// ── Films Module ──────────────────────────────────────────────────
+
+let filmsTab = 'list'; // 'list', 'upload', 'schedule'
+let _filmsData = [];
+let _filmsShown = 0;
+
+function filmFileUrl(filmId, filename) {
+    return `${API_BASE}/film-file/${filmId}/${filename}?token=${TOKEN}`;
+}
+
+async function renderFilmsView() {
+    const main = document.getElementById('main-content');
+    const stats = await api('GET', '/films/stats');
+
+    const igFbAccounts = accounts.filter(a => a.type === 'instagram_facebook');
+    const ytAccounts = accounts.filter(a => a.type === 'youtube');
+
+    main.innerHTML = `<div class="account-view">
+        <div class="account-header">
+            <div class="account-info">
+                <div class="account-avatar">\u{1F3AC}</div>
+                <div>
+                    <h2>Filmy</h2>
+                    <div class="account-meta">
+                        ${stats.total} film\u00f3w \u2022 ${stats.scheduled} zaplanowanych \u2022 ${stats.published} opublikowanych
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="tabs">
+            <button class="tab ${filmsTab === 'list' ? 'active' : ''}" onclick="filmsTab='list';renderFilmsView()">Lista film\u00f3w</button>
+            <button class="tab ${filmsTab === 'upload' ? 'active' : ''}" onclick="filmsTab='upload';renderFilmsView()">Dodaj film</button>
+            <button class="tab ${filmsTab === 'schedule' ? 'active' : ''}" onclick="filmsTab='schedule';renderFilmsView()">Harmonogram</button>
+        </div>
+        <div id="films-content"></div>
+    </div>`;
+
+    const container = document.getElementById('films-content');
+    if (filmsTab === 'upload') {
+        await renderFilmUpload(container, igFbAccounts, ytAccounts);
+    } else if (filmsTab === 'schedule') {
+        await renderFilmSchedule(container, igFbAccounts, ytAccounts);
+    } else {
+        await renderFilmList(container);
+    }
+}
+
+async function renderFilmUpload(container, igFbAccounts, ytAccounts) {
+    const fbOptions = igFbAccounts.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+    const ytOptions = ytAccounts.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+
+    let schedInfo = '';
+    try {
+        const sched = await api('GET', '/films/schedule');
+        const parts = [];
+        if (sched.fb_enabled && sched.fb_account_id) {
+            const accName = igFbAccounts.find(a => a.id === sched.fb_account_id)?.name || '?';
+            parts.push(`FB: ${accName} o ${sched.fb_publish_time}`);
+        }
+        if (sched.yt_enabled && sched.yt_account_id) {
+            const accName = ytAccounts.find(a => a.id === sched.yt_account_id)?.name || '?';
+            parts.push(`YT: ${accName} o ${sched.yt_publish_time}`);
+        }
+        if (parts.length > 0) {
+            schedInfo = `<div class="schedule-hint" style="margin-bottom:16px;padding:10px;background:var(--surface-2);border-radius:var(--radius)">
+                Automatyczny harmonogram aktywny: ${parts.join(' \u2022 ')}<br>
+                <small>Zostaw pola kont i dat puste, aby u\u017cy\u0107 harmonogramu.</small>
+            </div>`;
+        }
+    } catch (_) {}
+
+    container.innerHTML = `<div class="tab-content active">
+        ${schedInfo}
+        <form id="film-upload-form" onsubmit="submitFilmUpload(event)">
+            <div class="form-group">
+                <label>Plik wideo (MP4, MOV)</label>
+                <input type="file" id="film-video" accept="video/*" required>
+            </div>
+            <div class="form-group">
+                <label>Miniaturka (JPG/PNG)</label>
+                <input type="file" id="film-thumbnail" accept="image/jpeg,image/png,image/webp">
+                <div id="film-thumb-preview" style="margin-top:8px"></div>
+            </div>
+            <div class="form-group">
+                <label>Napisy SRT</label>
+                <input type="file" id="film-subtitle" accept=".srt,.vtt">
+            </div>
+            <div class="form-group">
+                <label>Tytu\u0142</label>
+                <input type="text" id="film-title" maxlength="100" placeholder="Tytu\u0142 filmu">
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>Opis Facebook <span style="color:var(--text-dim)">(d\u0142ugi)</span></label>
+                    <textarea id="film-fb-desc" rows="8" placeholder="Rozbudowany opis na Facebooka..."></textarea>
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Opis YouTube <span style="color:var(--text-dim)">(z timeline)</span></label>
+                    <textarea id="film-yt-desc" rows="8" placeholder="Opis z timeline na YouTube..."></textarea>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>Konto Facebook <span style="color:var(--text-dim)">(opcjonalne)</span></label>
+                    <select id="film-fb-account">
+                        <option value="">-- z harmonogramu --</option>
+                        ${fbOptions}
+                    </select>
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Data publikacji FB <span style="color:var(--text-dim)">(opcjonalne)</span></label>
+                    <input type="datetime-local" id="film-fb-date">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>Konto YouTube <span style="color:var(--text-dim)">(opcjonalne)</span></label>
+                    <select id="film-yt-account">
+                        <option value="">-- z harmonogramu --</option>
+                        ${ytOptions}
+                    </select>
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Data publikacji YT <span style="color:var(--text-dim)">(opcjonalne)</span></label>
+                    <input type="datetime-local" id="film-yt-date">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>Tagi YT <span style="color:var(--text-dim)">(rozdzielone przecinkami)</span></label>
+                    <input type="text" id="film-yt-tags" placeholder="tag1, tag2, tag3">
+                </div>
+                <div class="form-group" style="flex:0.5">
+                    <label>Prywatno\u015b\u0107 YT</label>
+                    <select id="film-yt-privacy">
+                        <option value="public">Publiczny</option>
+                        <option value="unlisted">Niepubliczny</option>
+                        <option value="private">Prywatny</option>
+                    </select>
+                </div>
+            </div>
+            <div style="margin-top:16px">
+                <button type="submit" class="btn btn-primary" id="film-submit-btn">Dodaj film</button>
+            </div>
+        </form>
+    </div>`;
+
+    // Thumbnail preview
+    document.getElementById('film-thumbnail').addEventListener('change', e => {
+        const file = e.target.files[0];
+        if (file) {
+            const url = URL.createObjectURL(file);
+            document.getElementById('film-thumb-preview').innerHTML =
+                `<img src="${url}" style="max-width:200px;max-height:120px;border-radius:var(--radius)">`;
+        }
+    });
+}
+
+async function submitFilmUpload(e) {
+    e.preventDefault();
+    const btn = document.getElementById('film-submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Przesy\u0142anie...';
+
+    try {
+        const fd = new FormData();
+        const videoFile = document.getElementById('film-video').files[0];
+        if (!videoFile) { toast('Wybierz plik wideo', 'error'); return; }
+        fd.append('video', videoFile);
+
+        const thumbFile = document.getElementById('film-thumbnail').files[0];
+        if (thumbFile) fd.append('thumbnail', thumbFile);
+
+        const subFile = document.getElementById('film-subtitle').files[0];
+        if (subFile) fd.append('subtitle', subFile);
+
+        fd.append('title', document.getElementById('film-title').value || videoFile.name.replace(/\.[^.]+$/, ''));
+        fd.append('fb_description', document.getElementById('film-fb-desc').value);
+        fd.append('yt_description', document.getElementById('film-yt-desc').value);
+        fd.append('yt_tags', document.getElementById('film-yt-tags').value);
+        fd.append('yt_privacy', document.getElementById('film-yt-privacy').value);
+
+        const fbAcc = document.getElementById('film-fb-account').value;
+        const fbDate = document.getElementById('film-fb-date').value;
+        if (fbAcc) fd.append('fb_account_id', fbAcc);
+        if (fbDate) fd.append('fb_publish_date', fbDate);
+
+        const ytAcc = document.getElementById('film-yt-account').value;
+        const ytDate = document.getElementById('film-yt-date').value;
+        if (ytAcc) fd.append('yt_account_id', ytAcc);
+        if (ytDate) fd.append('yt_publish_date', ytDate);
+
+        await api('POST', '/films/upload', fd, true);
+        toast('Film dodany', 'success');
+        filmsTab = 'list';
+        await renderFilmsView();
+    } catch (err) {
+        toast('B\u0142\u0105d: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Dodaj film';
+    }
+}
+
+async function renderFilmSchedule(container, fbAccounts, ytAccounts) {
+    try {
+        const [sched, fbScheds] = await Promise.all([
+            api('GET', '/films/schedule'),
+            api('GET', '/films/schedule/fb'),
+        ]);
+        const days = ['pon', 'wt', '\u015br', 'czw', 'pt', 'sob', 'nd'];
+        const daysEn = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+        function buildScheduleFields(prefix, dow, time, startDate, enabled) {
+            const activeDays = dow === '*' ? daysEn : dow.split(',').map(d => d.trim());
+            const [h, m] = (time || '12:00').split(':');
+            return `
+                <div class="schedule-row" style="margin-bottom:12px">
+                    <div class="schedule-field">
+                        <label>Aktywny</label>
+                        <select id="fsched-${prefix}-enabled">
+                            <option value="1" ${enabled ? 'selected' : ''}>Tak</option>
+                            <option value="0" ${!enabled ? 'selected' : ''}>Nie</option>
+                        </select>
+                    </div>
+                    <div class="schedule-field">
+                        <label>Godzina</label>
+                        <div class="time-slot">
+                            <select id="fsched-${prefix}-hour">${buildHourOptions(h)}</select>
+                            <span class="time-sep">:</span>
+                            <select id="fsched-${prefix}-minute">${buildMinuteOptions(m)}</select>
+                        </div>
+                    </div>
+                </div>
+                <div class="schedule-row" style="margin-bottom:12px">
+                    <div class="schedule-field">
+                        <label>Dni tygodnia</label>
+                        <div class="days-selector">
+                            ${days.map((d, i) => `<button type="button" class="day-btn ${activeDays.includes(daysEn[i]) ? 'active' : ''}"
+                                data-day="${daysEn[i]}" data-prefix="${prefix}" onclick="this.classList.toggle('active')">${d}</button>`).join('')}
+                        </div>
+                    </div>
+                    <div class="schedule-field">
+                        <label>Nie planuj przed</label>
+                        <input type="date" id="fsched-${prefix}-start" value="${startDate || ''}" style="padding:6px 10px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface-2);color:var(--text)">
+                    </div>
+                </div>`;
+        }
+
+        const fbPanels = fbAccounts.map(acc => {
+            const s = fbScheds.find(x => x.account_id === acc.id) || {};
+            const prefix = `fb${acc.id}`;
+            return `<div class="schedule-panel" style="margin-bottom:16px;padding:16px;background:var(--surface-2);border-radius:var(--radius)">
+                <h4 style="margin:0 0 12px">${esc(acc.name)}</h4>
+                ${buildScheduleFields(prefix, s.day_of_week || '*', s.publish_time || '12:00', s.start_date, s.enabled)}
+            </div>`;
+        }).join('');
+
+        const ytAcc = ytAccounts[0];
+        const ytPanel = `<div class="schedule-panel" style="margin-bottom:16px;padding:16px;background:var(--surface-2);border-radius:var(--radius)">
+            <h4 style="margin:0 0 12px">${ytAcc ? esc(ytAcc.name) : '— brak konta YT —'}</h4>
+            ${buildScheduleFields('yt', sched.yt_day_of_week || '*', sched.yt_publish_time || '18:00', sched.yt_start_date, sched.yt_enabled)}
+        </div>`;
+
+        container.innerHTML = `<div class="tab-content active">
+            <h3 style="margin-bottom:12px">Facebook \u2014 harmonogram per konto</h3>
+            ${fbPanels || '<p style="color:var(--text-dim)">Brak kont Facebook/Instagram.</p>'}
+            <h3 style="margin:20px 0 12px">YouTube</h3>
+            ${ytPanel}
+            <div style="margin:12px 0 16px;color:var(--text-dim);font-size:13px">
+                Film dostaje dat\u0119 automatycznie gdy ma: tytu\u0142, opis FB/YT, miniaturk\u0119 i plik SRT.
+            </div>
+            <button class="btn btn-primary" onclick="saveFilmSchedule()">Zapisz harmonogram film\u00f3w</button>
+        </div>`;
+    } catch (e) {
+        container.innerHTML = `<div class="tab-content active"><p style="color:var(--red)">B\u0142\u0105d: ${e.message}</p></div>`;
+    }
+}
+
+async function saveFilmSchedule() {
+    function getFieldsForPrefix(prefix) {
+        const enabled = document.getElementById(`fsched-${prefix}-enabled`)?.value === '1';
+        const hour = document.getElementById(`fsched-${prefix}-hour`)?.value || '12';
+        const minute = document.getElementById(`fsched-${prefix}-minute`)?.value || '00';
+        const startDate = document.getElementById(`fsched-${prefix}-start`)?.value || null;
+        const activeDays = Array.from(
+            document.querySelectorAll(`.day-btn[data-prefix="${prefix}"].active`)
+        ).map(b => b.dataset.day);
+        return {
+            enabled,
+            publish_time: `${hour}:${minute}`,
+            day_of_week: activeDays.length === 7 ? '*' : (activeDays.join(',') || '*'),
+            start_date: startDate,
+        };
+    }
+    try {
+        const fbAccs = accounts.filter(a => a.type === 'instagram_facebook');
+        const ytAccs = accounts.filter(a => a.type === 'youtube');
+        const saves = fbAccs.map(acc => api('PUT', `/films/schedule/fb/${acc.id}`, getFieldsForPrefix(`fb${acc.id}`)));
+        const ytData = getFieldsForPrefix('yt');
+        saves.push(api('PUT', '/films/schedule', {
+            yt_account_id: ytAccs[0] ? ytAccs[0].id : null,
+            yt_enabled: ytData.enabled,
+            yt_publish_time: ytData.publish_time,
+            yt_day_of_week: ytData.day_of_week,
+            yt_start_date: ytData.start_date,
+        }));
+        await Promise.all(saves);
+        toast('Harmonogram film\u00f3w zapisany', 'success');
+    } catch (e) {
+        toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}
+
+let _filmsFilterFbAccount = '';
+
+async function renderFilmList(container) {
+    const fbAccounts = accounts.filter(a => a.type === 'instagram_facebook');
+    const url = _filmsFilterFbAccount ? `/films?fb_account_id=${_filmsFilterFbAccount}` : '/films';
+    const films = await api('GET', url);
+    _filmsData = films;
+    _filmsShown = 0;
+
+    const filterBar = `<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+        <label style="font-size:13px;color:var(--text-dim)">Konto FB:</label>
+        <select onchange="_filmsFilterFbAccount=this.value;renderFilmsView()" style="padding:4px 8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface-2);color:var(--text)">
+            <option value="" ${!_filmsFilterFbAccount ? 'selected' : ''}>Wszystkie</option>
+            ${fbAccounts.map(a => `<option value="${a.id}" ${_filmsFilterFbAccount == a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}
+        </select>
+        <span style="font-size:13px;color:var(--text-dim)">${films.length} film\u00f3w</span>
+    </div>`;
+
+    if (films.length === 0) {
+        container.innerHTML = `<div class="tab-content active">
+            ${filterBar}
+            <div class="empty-state">
+                <div class="empty-state-icon">\u{1F3AC}</div>
+                <div class="empty-state-text">Brak film\u00f3w</div>
+                <div class="empty-state-sub">Dodaj film w zak\u0142adce "Dodaj film"</div>
+            </div>
+        </div>`;
+        return;
+    }
+
+    container.innerHTML = `<div class="tab-content active">
+        ${filterBar}
+        <div class="video-list" id="films-list"></div>
+    </div>`;
+    showMoreFilms();
+}
+
+function buildFilmCard(f) {
+    const thumbUrl = f.thumbnail_filename
+        ? filmFileUrl(f.id, f.thumbnail_filename)
+        : (f.video_filename ? filmFileUrl(f.id, f.video_filename) + '#t=1' : '');
+    const dur = f.duration ? fmtDuration(f.duration) : '';
+    const size = f.file_size ? fmtSize(f.file_size) : '';
+
+    function statusBadge(status) {
+        const labels = { draft: 'Szkic', scheduled: 'Zaplanowany', publishing: 'Publikowanie...', published: 'Opublikowany', failed: 'B\u0142\u0105d' };
+        return `<span class="status-badge ${status}">${labels[status] || status}</span>`;
+    }
+
+    const fbLine = f.fb_account_id
+        ? `<div class="film-target"><span class="platform-badge fb">FB</span> ${esc(f.fb_account_name || '')} ${f.fb_publish_date ? '\u2022 ' + fmtDateFull(f.fb_publish_date) : ''} ${statusBadge(f.fb_status)}</div>`
+        : '';
+    const ytLine = f.yt_account_id
+        ? `<div class="film-target"><span class="platform-badge yt">YT</span> ${esc(f.yt_account_name || '')} ${f.yt_publish_date ? '\u2022 ' + fmtDateFull(f.yt_publish_date) : ''} ${statusBadge(f.yt_status)}</div>`
+        : '';
+
+    const hasThumb = !!f.thumbnail_filename;
+    const hasSrt = !!f.subtitle_filename;
+
+    return `<div class="film-card">
+        <div class="film-thumbnail">
+            ${hasThumb
+                ? `<img data-src="${thumbUrl}" alt="" class="lazy-thumb" style="width:100%;height:100%;object-fit:cover">`
+                : `<video data-src="${thumbUrl}" preload="none" muted style="width:100%;height:100%;object-fit:cover"></video>`}
+            ${dur ? `<span class="film-duration">${dur}</span>` : ''}
+        </div>
+        <div class="video-info" style="flex:1">
+            <div class="video-title">${esc(f.title || f.original_filename || f.video_filename)}</div>
+            <div class="video-meta" style="margin-top:4px">
+                ${size ? `<span>${size}</span>` : ''}
+                ${hasThumb ? '<span class="file-badge">Miniaturka</span>' : ''}
+                ${hasSrt ? '<span class="file-badge">SRT</span>' : ''}
+            </div>
+            <div class="film-targets" style="margin-top:8px">
+                ${fbLine || '<div class="film-target" style="color:var(--text-dim)">FB: nie przypisano</div>'}
+                ${ytLine || '<div class="film-target" style="color:var(--text-dim)">YT: nie przypisano</div>'}
+            </div>
+            ${f.fb_status === 'failed' && f.fb_error ? `<div style="color:var(--red);font-size:11px;margin-top:4px">FB: ${esc(f.fb_error)}</div>` : ''}
+            ${f.yt_status === 'failed' && f.yt_error ? `<div style="color:var(--red);font-size:11px;margin-top:4px">YT: ${esc(f.yt_error)}</div>` : ''}
+        </div>
+        <div class="video-actions" style="flex-direction:column;gap:4px">
+            <button class="btn btn-sm" onclick="showEditFilmModal(${f.id})">Edytuj</button>
+            ${f.fb_account_id && f.fb_status !== 'published' ? `<button class="btn btn-success btn-sm" onclick="publishFilmNow(${f.id},'fb')">Publikuj FB</button>` : ''}
+            ${f.yt_account_id && f.yt_status !== 'published' ? `<button class="btn btn-success btn-sm" onclick="publishFilmNow(${f.id},'yt')">Publikuj YT</button>` : ''}
+            <button class="btn btn-danger btn-sm" onclick="confirmDeleteFilm(${f.id})">Usu\u0144</button>
+        </div>
+    </div>`;
+}
+
+function showMoreFilms() {
+    const list = document.getElementById('films-list');
+    const end = Math.min(_filmsShown + PAGE_SIZE, _filmsData.length);
+    let html = '';
+    for (let i = _filmsShown; i < end; i++) {
+        html += buildFilmCard(_filmsData[i]);
+    }
+    const oldBtn = document.getElementById('films-load-more');
+    if (oldBtn) oldBtn.remove();
+    list.insertAdjacentHTML('beforeend', html);
+    _filmsShown = end;
+    // Lazy load thumbnails
+    list.querySelectorAll('img.lazy-thumb[data-src], video[data-src]').forEach(el => thumbObserver.observe(el));
+    if (_filmsShown < _filmsData.length) {
+        list.insertAdjacentHTML('beforeend',
+            `<div id="films-load-more" class="load-more-bar">
+                <button class="btn" onclick="showMoreFilms()">Poka\u017c wi\u0119cej (${_filmsData.length - _filmsShown})</button>
+            </div>`);
+    }
+}
+
+function fmtDuration(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+async function publishFilmNow(filmId, platform) {
+    if (!confirm(`Opublikowa\u0107 teraz na ${platform === 'fb' ? 'Facebooku' : 'YouTube'}?`)) return;
+    try {
+        await api('POST', `/films/${filmId}/publish/${platform}`);
+        toast('Film zakolejkowany do publikacji', 'success');
+        await renderFilmsView();
+    } catch (e) {
+        toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}
+
+async function autoLinkReelsForFilm(filmId) {
+    const resultEl = document.getElementById('ef-link-result');
+    const prefixes = document.getElementById('ef-topic-prefixes')?.value || '';
+    if (!prefixes.trim()) {
+        if (resultEl) resultEl.textContent = 'Najpierw wpisz prefiksy nazw plik\u00f3w.';
+        return;
+    }
+    try {
+        // Persist prefixes first so the API sees them
+        await api('PUT', `/films/${filmId}`, { topic_prefixes: prefixes });
+        const res = await api('POST', `/films/${filmId}/auto-link-reels`);
+        if (resultEl) resultEl.textContent = `Powi\u0105zano ${res.linked} rolek z kolejki.`;
+        toast(`Powi\u0105zano ${res.linked} rolek`, 'success');
+    } catch (e) {
+        if (resultEl) resultEl.textContent = 'B\u0142\u0105d: ' + e.message;
+        toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}
+
+async function generateFilmCommentsForFilm(filmId, regenerate) {
+    const resultEl = document.getElementById('ef-link-result');
+    if (resultEl) resultEl.textContent = 'Generowanie komentarzy AI w toku\u2026 (mo\u017ce potrwa\u0107)';
+    // Persist current prefixes + template before generating
+    try {
+        const tpl = document.getElementById('ef-fb-comment-template')?.value || '';
+        const pf = document.getElementById('ef-topic-prefixes')?.value || '';
+        await api('PUT', `/films/${filmId}`, { topic_prefixes: pf, fb_comment_template: tpl });
+        const res = await api('POST', `/films/${filmId}/generate-comments?regenerate=${regenerate ? 'true' : 'false'}`);
+        if (resultEl) {
+            resultEl.textContent = `Wygenerowano: ${res.generated}, pomini\u0119to (ju\u017c by\u0142y): ${res.skipped}, b\u0142\u0119d\u00f3w: ${res.failed.length}. Powi\u0105zanych rolek: ${res.total_linked}.`;
+        }
+        toast(`Wygenerowano ${res.generated} komentarzy`, 'success');
+    } catch (e) {
+        if (resultEl) resultEl.textContent = 'B\u0142\u0105d: ' + e.message;
+        toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}
+
+async function confirmDeleteFilm(filmId) {
+    if (!confirm('Na pewno usun\u0105\u0107 ten film?')) return;
+    try {
+        await api('DELETE', `/films/${filmId}`);
+        toast('Film usuni\u0119ty', 'success');
+        await renderFilmsView();
+    } catch (e) {
+        toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}
+
+async function showEditFilmModal(filmId) {
+    const film = await api('GET', `/films/${filmId}`);
+    const igFbAccounts = accounts.filter(a => a.type === 'instagram_facebook');
+    const ytAccounts = accounts.filter(a => a.type === 'youtube');
+    const fbOptions = igFbAccounts.map(a =>
+        `<option value="${a.id}" ${a.id === film.fb_account_id ? 'selected' : ''}>${esc(a.name)}</option>`
+    ).join('');
+    const ytOptions = ytAccounts.map(a =>
+        `<option value="${a.id}" ${a.id === film.yt_account_id ? 'selected' : ''}>${esc(a.name)}</option>`
+    ).join('');
+
+    const tags = (() => { try { return JSON.parse(film.yt_tags || '[]').join(', '); } catch { return ''; } })();
+
+    let body = `
+        <div class="form-group">
+            <label>Tytu\u0142</label>
+            <input type="text" id="ef-title" value="${esc(film.title || '')}" maxlength="100">
+        </div>
+        <div class="form-group">
+            <label>Opis Facebook</label>
+            <textarea id="ef-fb-desc" rows="6">${esc(film.fb_description || '')}</textarea>
+        </div>
+        <div class="form-group">
+            <label>Opis YouTube</label>
+            <textarea id="ef-yt-desc" rows="6">${esc(film.yt_description || '')}</textarea>
+        </div>
+        <div class="form-row">
+            <div class="form-group" style="flex:1">
+                <label>Konto Facebook</label>
+                <select id="ef-fb-account">
+                    <option value="">-- brak --</option>
+                    ${fbOptions}
+                </select>
+            </div>
+            <div class="form-group" style="flex:1">
+                <label>Data publikacji FB</label>
+                <input type="datetime-local" id="ef-fb-date" value="${film.fb_publish_date ? film.fb_publish_date.substring(0,16) : ''}">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group" style="flex:1">
+                <label>Konto YouTube</label>
+                <select id="ef-yt-account">
+                    <option value="">-- brak --</option>
+                    ${ytOptions}
+                </select>
+            </div>
+            <div class="form-group" style="flex:1">
+                <label>Data publikacji YT</label>
+                <input type="datetime-local" id="ef-yt-date" value="${film.yt_publish_date ? film.yt_publish_date.substring(0,16) : ''}">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group" style="flex:1">
+                <label>Tagi YT</label>
+                <input type="text" id="ef-yt-tags" value="${esc(tags)}">
+            </div>
+            <div class="form-group" style="flex:0.5">
+                <label>Prywatno\u015b\u0107 YT</label>
+                <select id="ef-yt-privacy">
+                    <option value="public" ${film.yt_privacy === 'public' ? 'selected' : ''}>Publiczny</option>
+                    <option value="unlisted" ${film.yt_privacy === 'unlisted' ? 'selected' : ''}>Niepubliczny</option>
+                    <option value="private" ${film.yt_privacy === 'private' ? 'selected' : ''}>Prywatny</option>
+                </select>
+            </div>
+        </div>
+        <hr style="margin:16px 0;border-color:var(--border)">
+        <div class="form-group">
+            <label>\u{1F3AC} Powi\u0105zane rolki — prefiksy nazw plik\u00f3w</label>
+            <input type="text" id="ef-topic-prefixes" value="${esc(film.topic_prefixes || '')}"
+                   placeholder="np. prl, polskaludowa, czyn">
+            <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
+                Rozdzielone przecinkami. Rolki, kt\u00f3rych nazwa zaczyna si\u0119 od dowolnego z tych prefiks\u00f3w (np. <code>prl_bony.mp4</code>) zostan\u0105 powi\u0105zane z tym filmem. Po publikacji rolki na FB pojawi si\u0119 komentarz z linkiem do tego filmu.
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Wskaz\u00f3wki dla AI (opcjonalnie)</label>
+            <textarea id="ef-fb-comment-template" rows="2" placeholder="np. Pisz lekko, bez ostatecznych ocen. Podkre\u015bl, \u017ce film daje szerszy kontekst.">${esc(film.fb_comment_template || '')}</textarea>
+        </div>
+        <div class="form-group">
+            <button class="btn btn-sm" type="button" onclick="autoLinkReelsForFilm(${film.id})">\u{1F517} Powi\u0105\u017c kolejk\u0119 z tym filmem</button>
+            <button class="btn btn-sm" type="button" onclick="generateFilmCommentsForFilm(${film.id}, false)" ${film.fb_permalink ? '' : 'disabled title="Najpierw opublikuj film na FB lub ustaw fb_permalink"'}>\u2728 Wygeneruj komentarze AI (puste)</button>
+            <button class="btn btn-sm" type="button" onclick="generateFilmCommentsForFilm(${film.id}, true)" ${film.fb_permalink ? '' : 'disabled'}>\u{1F501} Regeneruj wszystkie</button>
+            <div id="ef-link-result" style="font-size:12px;color:var(--text-dim);margin-top:6px"></div>
+        </div>
+
+        <div class="form-group" style="margin-top:12px">
+            <label>Podmie\u0144 pliki</label>
+            <div class="form-row">
+                <div style="flex:1"><label style="font-size:12px">Miniaturka</label><input type="file" id="ef-thumbnail" accept="image/*"></div>
+                <div style="flex:1"><label style="font-size:12px">Napisy SRT</label><input type="file" id="ef-subtitle" accept=".srt,.vtt"></div>
+            </div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
+                ${film.thumbnail_filename ? 'Miniaturka: ' + film.thumbnail_filename : 'Brak miniaturki'}
+                \u2022 ${film.subtitle_filename ? 'Napisy: ' + film.subtitle_filename : 'Brak napis\u00f3w'}
+            </div>
+        </div>`;
+
+    showModal('Edytuj film', body,
+        `<button class="btn" onclick="closeModal()">Anuluj</button>
+         <button class="btn btn-primary" onclick="saveFilmEdit(${filmId})">Zapisz</button>`);
+}
+
+async function saveFilmEdit(filmId) {
+    const data = {
+        title: document.getElementById('ef-title').value,
+        fb_description: document.getElementById('ef-fb-desc').value,
+        yt_description: document.getElementById('ef-yt-desc').value,
+        fb_account_id: parseInt(document.getElementById('ef-fb-account').value) || null,
+        fb_publish_date: document.getElementById('ef-fb-date').value || null,
+        yt_account_id: parseInt(document.getElementById('ef-yt-account').value) || null,
+        yt_publish_date: document.getElementById('ef-yt-date').value || null,
+        yt_tags: document.getElementById('ef-yt-tags').value.split(',').map(t => t.trim()).filter(Boolean),
+        yt_privacy: document.getElementById('ef-yt-privacy').value,
+        topic_prefixes: document.getElementById('ef-topic-prefixes')?.value || '',
+        fb_comment_template: document.getElementById('ef-fb-comment-template')?.value || '',
+    };
+
+    try {
+        await api('PUT', `/films/${filmId}`, data);
+
+        // Upload files if changed
+        const thumbFile = document.getElementById('ef-thumbnail').files[0];
+        const subFile = document.getElementById('ef-subtitle').files[0];
+        if (thumbFile || subFile) {
+            const fd = new FormData();
+            if (thumbFile) fd.append('thumbnail', thumbFile);
+            if (subFile) fd.append('subtitle', subFile);
+            await api('POST', `/films/${filmId}/upload-file`, fd, true);
+        }
+
+        closeModal();
+        toast('Film zaktualizowany', 'success');
+        await renderFilmsView();
+    } catch (e) {
+        toast('B\u0142\u0105d: ' + e.message, 'error');
+    }
+}

@@ -1,12 +1,22 @@
 # Secrets & credentials
 .env
 *.sqlite3
+*.db
 
 # Runtime data
 uploads/
 app.log
 __pycache__/
 *.pyc
+*.pz
+long_videos_cache.json
+
+# Backups
+*.bak
+*.bak.*
+
+# Server-specific local docs
+scripts/INSTRUKCJA_LOKALNA.md
 
 # OS
 .DS_Store

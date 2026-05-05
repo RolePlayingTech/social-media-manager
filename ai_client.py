@@ -116,6 +116,55 @@ def _call_google(api_key: str, model: str, system: str, user: str) -> str:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
+def build_film_comment_prompt(reel_title: str, reel_caption: str,
+                               film_title: str, film_description: str,
+                               film_url: str, custom_template: str = "") -> tuple:
+    """Build (system, user) prompts for generating a FB comment promoting the source film."""
+    extra = f"\n\nDodatkowe wytyczne autora (priorytet):\n{custom_template}" if custom_template else ""
+    system = f"""Jestes social media managerem. Zadanie: napisz krotki komentarz pod opublikowana rolka na Facebooku, ktora jest fragmentem dluzszego filmu. Komentarz ma zachecic do obejrzenia calego filmu.
+
+Zasady:
+- Po polsku, naturalnie, bez sztywnych zwrotow
+- 1-2 zdania (max 220 znakow LACZNIE Z LINKIEM)
+- Nawiaz konkretnie do tematu rolki (np. wymien postac, date, fakt)
+- Nie powtarzaj doslownie tytulu rolki
+- Zakoncz linkiem do calego filmu
+- Bez hasztagow, bez emoji (max 1 jesli pasuje)
+- Nie pisz "kliknij", "sprawdz", "zachecam" - po prostu zaproszenie w naturalny sposob
+- Mozesz uzyc form: "Caly material/film tutaj:", "Wiecej w pelnym filmie:", "Cala historia:" itp. — ROTUJ formy{extra}"""
+
+    user = f"""ROLKA (fragment):
+Tytul: {reel_title or '(brak)'}
+Opis: {(reel_caption or '')[:600]}
+
+PELNY FILM, do ktorego prowadzimy:
+Tytul: {film_title}
+Opis: {(film_description or '')[:400]}
+Link FB: {film_url}
+
+Napisz komentarz (po polsku, 1-2 zdania, koncz linkiem):"""
+
+    return system, user
+
+
+def generate_film_comment(provider: str, api_key: str, model: str,
+                           reel_title: str, reel_caption: str,
+                           film_title: str, film_description: str,
+                           film_url: str, custom_template: str = "") -> str:
+    """Generate a FB comment promoting the source film, tailored to the reel topic."""
+    system, user = build_film_comment_prompt(
+        reel_title, reel_caption, film_title, film_description, film_url, custom_template
+    )
+    if provider == "anthropic":
+        return _call_anthropic(api_key, model, system, user)
+    elif provider == "openai":
+        return _call_openai(api_key, model, system, user)
+    elif provider == "google":
+        return _call_google(api_key, model, system, user)
+    else:
+        raise ValueError(f"Unknown AI provider: {provider}")
+
+
 # Available models per provider
 MODELS = {
     "anthropic": [
