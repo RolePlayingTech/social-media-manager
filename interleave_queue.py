@@ -2,13 +2,14 @@
 Interleave the queue for an account so the same topic prefix doesn't appear
 back-to-back. Preserves original relative order within each prefix bucket.
 
-Run: python3 interleave_queue.py [--account-id N] [--dry-run]
+Run: python3 interleave_queue.py [--account-id N] [--dry-run] [--seed N]
 """
 
 import argparse
 import re
-import sys
-from collections import defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict, deque
+import heapq
+import random
 
 import database as db
 
@@ -20,32 +21,41 @@ def filename_prefix(filename: str) -> str:
 
 
 def interleave(items: list, key_fn, seed: int = 42) -> list:
-    """Return items reordered so consecutive items have different keys when possible.
-    Picks randomly from top-K largest buckets that aren't the last key, weighted by size.
-    Preserves original relative order within each bucket."""
-    import random
+    """Minimize adjacent matching keys while keeping each bucket in input order.
+
+    Always select the largest remaining bucket that differs from the last key.
+    Randomized tie-breaking is reproducible via seed. Unlike weighted
+    sampling, this avoids preventable same-topic runs in uneven queues.
+    """
     rng = random.Random(seed)
     buckets = OrderedDict()
-    for it in items:
-        k = key_fn(it)
-        buckets.setdefault(k, []).append(it)
+    for item in items:
+        buckets.setdefault(key_fn(item), deque()).append(item)
 
-    out = []
-    last_key = None
-    while any(buckets.values()):
-        candidates = [(k, len(v)) for k, v in buckets.items() if v and k != last_key]
-        if not candidates:
-            # Only same-key bucket left
-            chosen = next(k for k, v in buckets.items() if v)
-        else:
-            # Sort by remaining size desc; weighted random over top-N largest
-            candidates.sort(key=lambda x: -x[1])
-            top = candidates[:5]
-            weights = [c[1] for c in top]
-            chosen = rng.choices([c[0] for c in top], weights=weights, k=1)[0]
-        out.append(buckets[chosen].pop(0))
-        last_key = chosen
-    return out
+    # A fixed random tie order avoids comparing potentially different key types
+    # inside the heap. Most importantly, it keeps repeated runs reproducible.
+    keys = list(buckets)
+    rng.shuffle(keys)
+    priority = {key: index for index, key in enumerate(keys)}
+    heap = [(-len(queue), priority[key], key) for key, queue in buckets.items()]
+    heapq.heapify(heap)
+
+    ordered = []
+    last_key = object()  # Sentinel: None can be a legitimate key.
+    while heap:
+        candidate = heapq.heappop(heap)
+        if candidate[2] == last_key and heap:
+            alternative = heapq.heappop(heap)
+            heapq.heappush(heap, candidate)
+            candidate = alternative
+
+        remaining, rank, key = candidate
+        ordered.append(buckets[key].popleft())
+        if remaining < -1:
+            heapq.heappush(heap, (remaining + 1, rank, key))
+        last_key = key
+
+    return ordered
 
 
 def adjacency_count(items: list, key_fn) -> int:
@@ -61,6 +71,8 @@ def main():
     parser.add_argument("--account-id", type=int, default=None,
                         help="Restrict to one account (default: all queued accounts)")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Reproducible tie-breaking seed (default: 42)")
     args = parser.parse_args()
 
     with db.get_db() as conn:
@@ -77,7 +89,7 @@ def main():
 
     for acc_id, items in by_account.items():
         before_adj = adjacency_count(items, lambda v: filename_prefix(v["filename"]))
-        ordered = interleave(items, lambda v: filename_prefix(v["filename"]))
+        ordered = interleave(items, lambda v: filename_prefix(v["filename"]), seed=args.seed)
         after_adj = adjacency_count(ordered, lambda v: filename_prefix(v["filename"]))
         print(f"acc={acc_id}: {len(items)} items, "
               f"adjacent same-prefix: {before_adj} → {after_adj}")
