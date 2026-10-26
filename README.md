@@ -135,6 +135,25 @@ Each account has a **schedule** configurable in the **Schedule** tab:
 
 Videos in the queue get published in order. The queue view shows **estimated publish dates** calculated from the schedule.
 
+### Optional queue interleaving
+
+When queued filenames start with a topic/series prefix (for example,
+`cats_001.mp4` and `dogs_001.mp4`), the standalone interleaving tool can
+spread topics apart while keeping the original order **within each topic**.
+It minimizes consecutive posts from the same topic when possible. It
+changes **queued positions only**; it does not upload or publish anything.
+
+Preview the proposed order before applying it:
+
+```bash
+python3 interleave_queue.py --account-id 1 --dry-run
+python3 interleave_queue.py --account-id 1
+```
+
+Omit `--account-id` to process every queued account. Use `--seed N` to
+control reproducible tie-breaking; the default is `42`.
+Run regression tests with `python3 -m unittest discover -s tests -v`.
+
 ### Per-video platform targeting (Instagram + Facebook)
 
 Each video can be published to Instagram, Facebook, or both:
