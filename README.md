@@ -2,6 +2,8 @@
 
 A self-hosted social media publishing queue manager for **Instagram**, **Facebook**, and **YouTube**. Built with FastAPI, SQLite, and a vanilla JS dashboard.
 
+> **Looking for the full multi-workspace Brand OS & Remote MCP server?** The ideas from this early prototype evolved into [**MUMRO (`mumro.io`)**](https://mumro.io/) — combining persistent Brand Memory, a multilingual website CMS, multi-channel social queues, cohort analytics, and 38+ governed Remote MCP tools (`Prepare -> Confirm` human approval gates) — alongside the open engineering handbook at [**MUMRO Academy (`academy.mumro.io`)**](https://academy.mumro.io/).
+
 ## Features
 
 - **Multi-account support** — manage multiple Instagram+Facebook pairs and YouTube channels from one dashboard
@@ -28,7 +30,7 @@ A self-hosted social media publishing queue manager for **Instagram**, **Faceboo
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/yourusername/social-media-manager.git /opt/social-media-manager
+git clone https://github.com/RolePlayingTech/social-media-manager.git /opt/social-media-manager
 cd /opt/social-media-manager
 
 # Install dependencies
